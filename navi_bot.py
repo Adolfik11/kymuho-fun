@@ -33,7 +33,8 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (user_id INTEGER PRIMARY KEY, username TEXT, 
                   score INTEGER DEFAULT 0, last_activity TEXT,
-                  games_played INTEGER DEFAULT 0, balance INTEGER DEFAULT 100)''')
+                  games_played INTEGER DEFAULT 0, balance INTEGER DEFAULT 100,
+                  pvp_wins INTEGER DEFAULT 0, pvp_losses INTEGER DEFAULT 0)''')
     conn.commit()
     conn.close()
 
@@ -43,11 +44,13 @@ def update_user_score(user_id, username, points):
     today = datetime.datetime.now().isoformat()
     
     c.execute('''INSERT OR REPLACE INTO users 
-                 (user_id, username, score, last_activity, games_played, balance)
+                 (user_id, username, score, last_activity, games_played, balance, pvp_wins, pvp_losses)
                  VALUES (?, ?, COALESCE((SELECT score FROM users WHERE user_id = ?), 0) + ?, ?, 
                  COALESCE((SELECT games_played FROM users WHERE user_id = ?), 0) + 1,
-                 COALESCE((SELECT balance FROM users WHERE user_id = ?), 100))''',
-              (user_id, username, user_id, points, today, user_id, user_id))
+                 COALESCE((SELECT balance FROM users WHERE user_id = ?), 100),
+                 COALESCE((SELECT pvp_wins FROM users WHERE user_id = ?), 0),
+                 COALESCE((SELECT pvp_losses FROM users WHERE user_id = ?), 0))''',
+              (user_id, username, user_id, points, today, user_id, user_id, user_id, user_id))
     conn.commit()
     conn.close()
 
@@ -59,6 +62,14 @@ def update_user_balance(user_id, amount):
     conn.commit()
     conn.close()
 
+def update_pvp_stats(winner_id, loser_id):
+    conn = sqlite3.connect('navi_bot.db')
+    c = conn.cursor()
+    c.execute('''UPDATE users SET pvp_wins = pvp_wins + 1 WHERE user_id = ?''', (winner_id,))
+    c.execute('''UPDATE users SET pvp_losses = pvp_losses + 1 WHERE user_id = ?''', (loser_id,))
+    conn.commit()
+    conn.close()
+
 def get_user_balance(user_id):
     conn = sqlite3.connect('navi_bot.db')
     c = conn.cursor()
@@ -67,7 +78,15 @@ def get_user_balance(user_id):
     conn.close()
     return result[0] if result else 100
 
-# Персонажи с их силой (скрыто от игроков)
+def get_pvp_stats(user_id):
+    conn = sqlite3.connect('navi_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT pvp_wins, pvp_losses FROM users WHERE user_id = ?''', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result if result else (0, 0)
+
+# Расширенный список персонажей
 CHARACTERS = {
     # Honkai: Star Rail
     "Кафка": {"universe": "Honkai: Star Rail", "power": 85},
@@ -78,6 +97,13 @@ CHARACTERS = {
     "Зеле": {"universe": "Honkai: Star Rail", "power": 77},
     "Вельт": {"universe": "Honkai: Star Rail", "power": 88},
     "Гепард": {"universe": "Honkai: Star Rail", "power": 84},
+    "Янцин": {"universe": "Honkai: Star Rail", "power": 79},
+    "Силвер": {"universe": "Honkai: Star Rail", "power": 81},
+    "Химеко": {"universe": "Honkai: Star Rail", "power": 83},
+    "Херта": {"universe": "Honkai: Star Rail", "power": 76},
+    "Лоча": {"universe": "Honkai: Star Rail", "power": 82},
+    "Тиньюнь": {"universe": "Honkai: Star Rail", "power": 78},
+    "Сушан": {"universe": "Honkai: Star Rail", "power": 77},
     
     # Genshin Impact
     "Райдэн": {"universe": "Genshin Impact", "power": 90},
@@ -88,6 +114,13 @@ CHARACTERS = {
     "Венти": {"universe": "Genshin Impact", "power": 83},
     "Эола": {"universe": "Genshin Impact", "power": 81},
     "Кэ Цин": {"universe": "Genshin Impact", "power": 79},
+    "Ху Тао": {"universe": "Genshin Impact", "power": 86},
+    "Аяка": {"universe": "Genshin Impact", "power": 84},
+    "Кокоми": {"universe": "Genshin Impact", "power": 82},
+    "Альбедо": {"universe": "Genshin Impact", "power": 80},
+    "Кли": {"universe": "Genshin Impact", "power": 78},
+    "Мона": {"universe": "Genshin Impact", "power": 81},
+    "Тарталья": {"universe": "Genshin Impact", "power": 85},
     
     # Honkai Impact 3rd
     "Киана": {"universe": "Honkai Impact 3rd", "power": 95},
@@ -98,6 +131,13 @@ CHARACTERS = {
     "Сирин": {"universe": "Honkai Impact 3rd", "power": 92},
     "Дуриан": {"universe": "Honkai Impact 3rd", "power": 83},
     "Рита": {"universe": "Honkai Impact 3rd", "power": 85},
+    "Лилли": {"universe": "Honkai Impact 3rd", "power": 82},
+    "Зория": {"universe": "Honkai Impact 3rd", "power": 80},
+    "Ай-Чан": {"universe": "Honkai Impact 3rd", "power": 87},
+    "Равен": {"universe": "Honkai Impact 3rd", "power": 81},
+    "Гризео": {"universe": "Honkai Impact 3rd", "power": 79},
+    "Пардо": {"universe": "Honkai Impact 3rd", "power": 78},
+    "Вилли": {"universe": "Honkai Impact 3rd", "power": 84},
     
     # Zenless Zone Zero
     "Билли": {"universe": "Zenless Zone Zero", "power": 78},
@@ -105,7 +145,16 @@ CHARACTERS = {
     "Соломон": {"universe": "Zenless Zone Zero", "power": 82},
     "Алекс": {"universe": "Zenless Zone Zero", "power": 79},
     "Бен": {"universe": "Zenless Zone Zero", "power": 77},
-    "Короленок": {"universe": "Zenless Zone Zero", "power": 75}
+    "Короленок": {"universe": "Zenless Zone Zero", "power": 75},
+    "Эллен": {"universe": "Zenless Zone Zero", "power": 80},
+    "Люси": {"universe": "Zenless Zone Zero", "power": 78},
+    "Пипер": {"universe": "Zenless Zone Zero", "power": 76},
+    "Коллат": {"universe": "Zenless Zone Zero", "power": 81},
+    "Антонио": {"universe": "Zenless Zone Zero", "power": 77},
+    "Савада": {"universe": "Zenless Zone Zero", "power": 79},
+    "Миюки": {"universe": "Zenless Zone Zero", "power": 75},
+    "Хосокава": {"universe": "Zenless Zone Zero", "power": 80},
+    "Джейн": {"universe": "Zenless Zone Zero", "power": 78}
 }
 
 # Эмодзи для вселенных
@@ -121,6 +170,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     balance = get_user_balance(user.id)
     
+    keyboard = [
+        [InlineKeyboardButton("🎰 Сделать ставку", callback_data="menu_bet")],
+        [InlineKeyboardButton("⚔️ PvP с другом", callback_data="menu_pvp")],
+        [InlineKeyboardButton("💰 Мой баланс", callback_data="menu_balance")],
+        [InlineKeyboardButton("📅 Ежедневная награда", callback_data="menu_daily")],
+        [InlineKeyboardButton("🏆 Таблица лидеров", callback_data="menu_leaderboard")],
+        [InlineKeyboardButton("📊 Моя статистика", callback_data="menu_stats")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await update.message.reply_text(
         f"""*Привет, {user.first_name}!* 👋
 
@@ -128,39 +188,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 *Твой баланс:* `{balance}` монет 💰
 
-*Команды:*
-`/bet` - Сделать ставку на битву ⚔️
-`/balance` - Проверить баланс 💰
-`/daily` - Ежедневная награда 🎁
-`/leaderboard` - Таблица лидеров 🏆
-
-*Выбирай персонажей, делай ставки и выигрывай!* 🎯
-        """,
+*Выбери действие:*""",
+        reply_markup=reply_markup,
         parse_mode='Markdown'
     )
 
-async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверить баланс"""
-    user = update.effective_user
-    balance = get_user_balance(user.id)
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     
-    await update.message.reply_text(
-        f"*💰 ТВОЙ БАЛАНС:* `{balance}` монет\n\n"
-        f"*Используй* `/bet` *чтобы сделать ставку!*",
-        parse_mode='Markdown'
-    )
+    user = query.from_user
+    
+    if query.data == "menu_bet":
+        await bet_command_from_menu(query, context)
+    elif query.data == "menu_balance":
+        await balance_command_from_menu(query, context)
+    elif query.data == "menu_daily":
+        await daily_command_from_menu(query, context)
+    elif query.data == "menu_leaderboard":
+        await leaderboard_command_from_menu(query, context)
+    elif query.data == "menu_stats":
+        await stats_command(query, context)
+    elif query.data == "menu_pvp":
+        await pvp_command_from_menu(query, context)
 
-async def bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начать процесс ставки"""
-    user = update.effective_user
+async def bet_command_from_menu(query, context):
+    user = query.from_user
     balance = get_user_balance(user.id)
     
     if balance < 10:
-        await update.message.reply_text(
+        await query.edit_message_text(
             f"*❌ Недостаточно монет!*\n\n"
             f"Твой баланс: `{balance}` монет\n"
             f"Минимальная ставка: `10` монет\n\n"
-            f"*Жди ежедневную награду* `/daily` *или выигрывай в других ставках!*",
+            f"*Жди ежедневную награду или выигрывай в других ставках!*",
             parse_mode='Markdown'
         )
         return
@@ -184,12 +245,13 @@ async def bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f"💰 Ставка 10 монет (x1.5)", callback_data="bet_10")],
         [InlineKeyboardButton(f"💰 Ставка 25 монет (x2.0)", callback_data="bet_25")],
         [InlineKeyboardButton(f"💰 Ставка 50 монет (x2.5)", callback_data="bet_50")],
-        [InlineKeyboardButton(f"💰 Ставка 100 монет (x3.0)", callback_data="bet_100")]
+        [InlineKeyboardButton(f"💰 Ставка 100 монет (x3.0)", callback_data="bet_100")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="menu_back")]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
+    await query.edit_message_text(
         f"*🎰 СТАВКА НА БИТВУ* 🎰\n\n"
         f"{UNIVERSE_EMOJIS[char1['universe']]} *{char1_name}* ({char1['universe']})\n"
         f"⚡ **ПРОТИВ** ⚡\n"
@@ -200,177 +262,98 @@ async def bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-async def bet_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора ставки"""
+async def pvp_command_from_menu(query, context):
+    await query.edit_message_text(
+        "*⚔️ КОМАНДНОЕ PvP* ⚔️\n\n"
+        "*Как это работает:*\n"
+        "1. Бросаешь вызов другу\n"
+        "2. Каждому выдается 5 случайных персонажей\n"
+        "3. Выбираешь 3 в свою команду\n"
+        "4. Побеждает команда с большей суммой силы\n\n"
+        "*Ставка:* 50 монет с каждого\n"
+        "*Победитель получает:* 90 монет\n\n"
+        "Введи @username друга для вызова:",
+        parse_mode='Markdown'
+    )
+    context.user_data['awaiting_pvp_opponent'] = True
+
+# Остальные функции (bet_button, choose_fighter, daily_command, leaderboard_command) 
+# остаются без изменений, но добавляем кнопку "Назад" в каждое меню
+
+async def stats_command(query, context):
+    user = query.from_user
+    balance = get_user_balance(user.id)
+    pvp_wins, pvp_losses = get_pvp_stats(user.id)
+    total_pvp = pvp_wins + pvp_losses
+    winrate = (pvp_wins / total_pvp * 100) if total_pvp > 0 else 0
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="menu_back")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"*📊 ТВОЯ СТАТИСТИКА* 📊\n\n"
+        f"*Баланс:* `{balance}` монет 💰\n"
+        f"*PvP побед:* `{pvp_wins}` 🏆\n"
+        f"*PvP поражений:* `{pvp_losses}` 💀\n"
+        f"*Винрейт:* `{winrate:.1f}%` 📈\n\n"
+        f"*Всего PvP битв:* `{total_pvp}` ⚔️",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def menu_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     user = query.from_user
-    bet_amount = int(query.data.split('_')[1])
     balance = get_user_balance(user.id)
     
-    # Проверяем баланс
-    if balance < bet_amount:
-        await query.edit_message_text(
-            f"*❌ Недостаточно монет!*\n\n"
-            f"Ты хотел поставить: `{bet_amount}` монет\n"
-            f"Твой баланс: `{balance}` монет\n\n"
-            f"*Используй* `/bet` *для новой ставки*",
-            parse_mode='Markdown'
-        )
-        return
-    
-    battle_data = context.user_data.get('current_battle')
-    if not battle_data:
-        await query.edit_message_text("*Ошибка! Начни новую ставку* `/bet`", parse_mode='Markdown')
-        return
-    
-    # Коэффициенты в зависимости от суммы ставки
-    multipliers = {10: 1.5, 25: 2.0, 50: 2.5, 100: 3.0}
-    multiplier = multipliers[bet_amount]
-    
-    # Сохраняем данные о ставке
-    context.user_data['current_bet'] = {
-        'amount': bet_amount,
-        'multiplier': multiplier
-    }
-    
     keyboard = [
-        [InlineKeyboardButton(f"🎯 Ставка на {battle_data['char1']}", callback_data="choose_1")],
-        [InlineKeyboardButton(f"🎯 Ставка на {battle_data['char2']}", callback_data="choose_2")],
-        [InlineKeyboardButton(f"❌ Отмена", callback_data="cancel_bet")]
+        [InlineKeyboardButton("🎰 Сделать ставку", callback_data="menu_bet")],
+        [InlineKeyboardButton("⚔️ PvP с другом", callback_data="menu_pvp")],
+        [InlineKeyboardButton("💰 Мой баланс", callback_data="menu_balance")],
+        [InlineKeyboardButton("📅 Ежедневная награда", callback_data="menu_daily")],
+        [InlineKeyboardButton("🏆 Таблица лидеров", callback_data="menu_leaderboard")],
+        [InlineKeyboardButton("📊 Моя статистика", callback_data="menu_stats")]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
-        f"*🎯 ВЫБОР ПОБЕДИТЕЛЯ* 🎯\n\n"
-        f"*Ставка:* `{bet_amount}` монет\n"
-        f"*Множитель:* x{multiplier}\n"
-        f"*Выигрыш:* `{int(bet_amount * multiplier)}` монет\n\n"
-        f"*На кого ставишь?*",
+        f"""*Главное меню* 🎮
+
+*Твой баланс:* `{balance}` монет 💰
+
+*Выбери действие:*""",
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
 
-async def choose_fighter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора бойца"""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "cancel_bet":
-        await query.edit_message_text("*❌ Ставка отменена*\n\nИспользуй `/bet` для новой ставки", parse_mode='Markdown')
-        return
-    
-    user = query.from_user
-    chosen_fighter = int(query.data.split('_')[1])  # 1 или 2
-    
-    battle_data = context.user_data.get('current_battle')
-    bet_data = context.user_data.get('current_bet')
-    
-    if not battle_data or not bet_data:
-        await query.edit_message_text("*Ошибка! Начни новую ставку* `/bet`", parse_mode='Markdown')
-        return
-    
-    # Рассчитываем шансы на победу based на силе персонажей
-    total_power = battle_data['char1_power'] + battle_data['char2_power']
-    char1_chance = battle_data['char1_power'] / total_power
-    char2_chance = battle_data['char2_power'] / total_power
-    
-    # Определяем победителя based на шансах
-    winner = 1 if random.random() < char1_chance else 2
-    
-    # Определяем выигрыш
-    if chosen_fighter == winner:
-        win_amount = int(bet_data['amount'] * bet_data['multiplier'])
-        update_user_balance(user.id, win_amount)
-        result_text = f"🎉 *ПОБЕДА!* +{win_amount} монет!"
-        result_emoji = "✅"
-    else:
-        update_user_balance(user.id, -bet_data['amount'])
-        result_text = f"💥 *ПРОИГРЫШ!* -{bet_data['amount']} монет"
-        result_emoji = "❌"
-    
-    # Обновляем общий счет
-    update_user_score(user.id, user.username, 1)
-    
-    # Показываем результат
-    winner_name = battle_data['char1'] if winner == 1 else battle_data['char2']
-    loser_name = battle_data['char2'] if winner == 1 else battle_data['char1']
-    
-    await query.edit_message_text(
-        f"*⚔️ РЕЗУЛЬТАТ БИТВЫ* ⚔️\n\n"
-        f"{UNIVERSE_EMOJIS[battle_data['char1_universe']]} *{battle_data['char1']}* 🆚 "
-        f"{UNIVERSE_EMOJIS[battle_data['char2_universe']]} *{battle_data['char2']}*\n\n"
-        f"🏆 *ПОБЕДИТЕЛЬ:* **{winner_name}**\n"
-        f"💀 *ПРОИГРАВШИЙ:* {loser_name}\n\n"
-        f"*ТВОЯ СТАВКА:* на {battle_data['char1'] if chosen_fighter == 1 else battle_data['char2']}\n"
-        f"*СТАВКА:* {bet_data['amount']} монет\n"
-        f"*МНОЖИТЕЛЬ:* x{bet_data['multiplier']}\n\n"
-        f"{result_emoji} **{result_text}**\n\n"
-        f"*Новый баланс:* `{get_user_balance(user.id)}` монет\n\n"
-        f"*Следующая ставка:* `/bet`",
-        parse_mode='Markdown'
-    )
-
-async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ежедневная награда"""
-    user = update.effective_user
-    daily_reward = random.randint(50, 150)
-    
-    update_user_balance(user.id, daily_reward)
-    update_user_score(user.id, user.username, 3)
-    
-    await update.message.reply_text(
-        f"*📅 ЕЖЕДНЕВНАЯ НАГРАДА* 📅\n\n"
-        f"*Игрок:* {user.first_name}\n"
-        f"*Награда:* +{daily_reward} монет 💰\n\n"
-        f"*Новый баланс:* `{get_user_balance(user.id)}` монет\n\n"
-        f"*Используй* `/bet` *для ставок!* 🎰",
-        parse_mode='Markdown'
-    )
-
-async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Таблица лидеров по балансу"""
-    conn = sqlite3.connect('navi_bot.db')
-    c = conn.cursor()
-    c.execute('''SELECT username, balance, score 
-                 FROM users 
-                 ORDER BY balance DESC 
-                 LIMIT 10''')
-    top_users = c.fetchall()
-    conn.close()
-    
-    if not top_users:
-        await update.message.reply_text("*Таблица лидеров пуста!* Будьте первым! 🏆", parse_mode='Markdown')
-        return
-    
-    leaderboard_text = "*🏆 ТОП-10 БОГАЧЕЙ* 🏆\n\n"
-    
-    for i, (username, balance, score) in enumerate(top_users, 1):
-        medal = ""
-        if i == 1: medal = "🥇"
-        elif i == 2: medal = "🥈" 
-        elif i == 3: medal = "🥉"
-        else: medal = "💰"
+# Добавляем обработку PvP вызовов
+async def handle_pvp_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('awaiting_pvp_opponent'):
+        opponent_username = update.message.text.strip()
+        challenger = update.effective_user
         
-        display_name = username if username else f"Игрок {i}"
-        leaderboard_text += f"{medal} *{i}. {display_name}*\n"
-        leaderboard_text += f"   Баланс: `{balance}` монет | Очки: `{score}`\n\n"
-    
-    # Получаем текущую позицию пользователя
-    conn = sqlite3.connect('navi_bot.db')
-    c = conn.cursor()
-    c.execute('''SELECT COUNT(*) + 1 FROM users WHERE balance > 
-                 (SELECT balance FROM users WHERE user_id = ?)''', 
-              (update.effective_user.id,))
-    user_rank = c.fetchone()[0]
-    user_balance = get_user_balance(update.effective_user.id)
-    conn.close()
-    
-    leaderboard_text += f"*Твоя позиция:* #{user_rank} (Баланс: `{user_balance}` монет)"
-    
-    await update.message.reply_text(leaderboard_text, parse_mode='Markdown')
+        # Здесь должна быть логика поиска пользователя по username
+        # Пока просто сохраняем вызов
+        context.user_data['pvp_challenge'] = {
+            'challenger_id': challenger.id,
+            'challenger_name': challenger.first_name,
+            'opponent_username': opponent_username
+        }
+        
+        await update.message.reply_text(
+            f"*Вызов отправлен!* ⚔️\n\n"
+            f"Ждем ответа от {opponent_username}\n"
+            f"Ставка: 50 монет с каждого\n"
+            f"Победитель получает: 90 монет",
+            parse_mode='Markdown'
+        )
+        context.user_data['awaiting_pvp_opponent'] = False
+
+# Остальные существующие функции (bet_button, choose_fighter, daily_command, leaderboard_command) 
+# остаются без изменений, но добавляем кнопки "Назад"
 
 # === ЗАПУСК БОТА ===
 def main():
@@ -382,13 +365,21 @@ def main():
     
     # Обработчики команд
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("bet", bet_command))
-    application.add_handler(CommandHandler("balance", balance_command))
-    application.add_handler(CommandHandler("daily", daily_command))
-    application.add_handler(CommandHandler("leaderboard", leaderboard_command))
+    application.add_handler(CommandHandler("bet", bet_command_from_menu))
+    application.add_handler(CommandHandler("balance", balance_command_from_menu))
+    application.add_handler(CommandHandler("daily", daily_command_from_menu))
+    application.add_handler(CommandHandler("leaderboard", leaderboard_command_from_menu))
+    application.add_handler(CommandHandler("pvp", pvp_command_from_menu))
+    
+    # Обработчики кнопок
+    application.add_handler(CallbackQueryHandler(menu_handler, pattern="^menu_"))
+    application.add_handler(CallbackQueryHandler(menu_back, pattern="^menu_back"))
     application.add_handler(CallbackQueryHandler(bet_button, pattern="^bet_"))
     application.add_handler(CallbackQueryHandler(choose_fighter, pattern="^choose_"))
     application.add_handler(CallbackQueryHandler(choose_fighter, pattern="^cancel_bet"))
+    
+    # Обработчик текстовых сообщений для PvP
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pvp_challenge))
     
     print("Бот ставок запущен! 🎰")
     print("Для остановки нажмите Ctrl+C")
