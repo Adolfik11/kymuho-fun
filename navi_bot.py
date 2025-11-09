@@ -8,6 +8,8 @@ import signal
 import sys
 import asyncio
 import threading
+import http.server
+import socketserver
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
@@ -29,6 +31,33 @@ pvp_team_selection = {}
 # Блокировки для thread-safe операций с балансом
 balance_locks = {}
 lock = threading.Lock()
+
+# === Health Check Server ===
+class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'Bot is alive')
+            logger.info("Health check passed")
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        # Отключаем стандартное логирование HTTP запросов
+        return
+
+def start_health_check_server():
+    """Запускает простой HTTP сервер для health checks"""
+    PORT = int(os.environ.get('PORT', 10000))
+    try:
+        with socketserver.TCPServer(("", PORT), HealthCheckHandler) as httpd:
+            logger.info(f"Health check server running on port {PORT}")
+            httpd.serve_forever()
+    except Exception as e:
+        logger.error(f"Health check server error: {e}")
 
 # === БАЗА ДАННЫХ ===
 def get_db_connection():
@@ -1367,4 +1396,9 @@ def main():
         sys.exit(1)
 
 if __name__ == '__main__':
+    # Запускаем health check сервер в отдельном потоке
+    health_thread = threading.Thread(target=start_health_check_server, daemon=True)
+    health_thread.start()
+    
+    # Запускаем бота в основном потоке
     main()
