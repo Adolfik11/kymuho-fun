@@ -12,9 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 # === КОНФИГУРАЦИЯ ===
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable is required!")
+BOT_TOKEN = "8578378221:AAHCZqygYGaDFqEbqSnVaORiHf2QF44RNWU"
 
 # Настройка логирования
 logging.basicConfig(
@@ -26,6 +24,7 @@ logger = logging.getLogger(__name__)
 # Глобальные словари для хранения активных PvP вызовов и битв
 active_pvp_challenges = {}
 active_pvp_battles = {}
+pvp_team_selection = {}
 
 # Блокировки для thread-safe операций с балансом
 balance_locks = {}
@@ -71,7 +70,7 @@ def get_user_lock(user_id):
         return balance_locks[user_id]
 
 def update_user_score(user_id, username, points):
-    """Обновление счета пользователя - УПРОЩЕННАЯ ВЕРСИЯ"""
+    """Обновление счета пользователя"""
     conn = get_db_connection()
     try:
         c = conn.cursor()
@@ -160,18 +159,10 @@ def update_pvp_stats(winner_id, loser_id):
     try:
         c = conn.cursor()
         
-        # ПРОВЕРЯЕМ СУЩЕСТВОВАНИЕ ПОЛЬЗОВАТЕЛЕЙ
-        c.execute('SELECT 1 FROM users WHERE user_id = ?', (winner_id,))
-        winner_exists = c.fetchone()
-        
-        c.execute('SELECT 1 FROM users WHERE user_id = ?', (loser_id,))
-        loser_exists = c.fetchone()
-        
-        # СОЗДАЕМ ПОЛЬЗОВАТЕЛЕЙ, ЕСЛИ ИХ НЕТ
-        if not winner_exists:
-            c.execute('INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 100)', (winner_id,))
-        if not loser_exists:
-            c.execute('INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 100)', (loser_id,))
+        # ГАРАНТИРУЕМ СУЩЕСТВОВАНИЕ ПОЛЬЗОВАТЕЛЕЙ
+        c.execute('INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 100)', (winner_id,))
+        c.execute('INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 100)', (loser_id,))
+        conn.commit()
         
         # ОБНОВЛЯЕМ СТАТИСТИКУ
         c.execute('UPDATE users SET pvp_wins = pvp_wins + 1 WHERE user_id = ?', (winner_id,))
@@ -776,23 +767,555 @@ async def cancel_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if 'current_battle' in context.user_data:
         del context.user_data['current_battle']
     
-    text = "*❌ Ставка отменена*\n\nВсе данные о текущей ставке очищены.\n\n*Используй* /start *для возврата в меню*"
+    text = "*❌ Ставка отменена*\n\nВсе данные о текущей ставке очищены.\n\n*Используй* `/start` *для возврата в меню*"
     
     await safe_edit_message(query, text)
 
-# === PvP СИСТЕМА (ВРЕМЕННО УБИРАЕМ ДЛЯ СТАБИЛЬНОСТИ) ===
+# === PvP СИСТЕМА (НОВАЯ ВЕРСИЯ С КОМАНДАМИ) ===
 async def pvp_command_from_menu(query, context):
-    """Меню PvP - УПРОЩЕННАЯ ВЕРСИЯ"""
+    """Меню PvP"""
+    user = query.from_user
+    
+    keyboard = [
+        [InlineKeyboardButton("🎯 Создать вызов", callback_data="pvp_create")],
+        [InlineKeyboardButton("❌ Отменить вызов", callback_data="pvp_cancel")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="menu_back")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await safe_edit_message(query,
-        "*⚔️ PvP СИСТЕМА* ⚔️\n\n"
-        "PvP система временно недоступна для стабилизации работы бота.\n"
-        "Мы работаем над улучшением и скоро вернем эту функцию! 🛠️\n\n"
-        "*Сейчас доступно:*\n"
-        "• 🎰 Ставки на битвы персонажей\n"
-        "• 💰 Ежедневные награды\n"
-        "• 🏆 Таблица лидеров\n\n"
-        "Используй /start для возврата в меню"
+        f"*⚔️ PvP СИСТЕМА* ⚔️\n\n"
+        f"*Привет, {user.first_name}!*\n\n"
+        f"*Как работает PvP:*\n"
+        f"• Создай вызов и отправь другу\n"
+        f"• Друг принимает вызов\n"
+        f"• Каждому выдаётся 5 случайных персонажей\n"
+        f"• Выбери 3 персонажа в свою команду\n"
+        f"• Побеждает команда с большей суммарной силой!\n\n"
+        f"*Ставка:* 50 монет с каждого игрока\n"
+        f"*Выигрыш:* 100 монет победителю!\n\n"
+        f"*Твой баланс:* `{get_user_balance_safe(user.id)}` монет\n"
+        f"*Выбери действие:*",
+        reply_markup=reply_markup
     )
+
+async def pvp_create_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создание PvP вызова"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    user_id = user.id
+    
+    # Проверяем баланс
+    balance = get_user_balance_safe(user_id)
+    if balance < 50:
+        await safe_edit_message(query,
+            f"*❌ Недостаточно монет для PvP!*\n\n"
+            f"Требуется: `50` монет\n"
+            f"Твой баланс: `{balance}` монет\n\n"
+            f"*Получи ежедневную награду или выиграй в обычных ставках!*"
+        )
+        return
+    
+    # Проверяем, нет ли активного вызова
+    if user_id in active_pvp_challenges:
+        await safe_edit_message(query,
+            "*⚠️ У тебя уже есть активный вызов!*\n\n"
+            "Дождись ответа или отмени текущий вызов."
+        )
+        return
+    
+    # Создаем вызов
+    challenge_id = f"pvp_{user_id}_{int(time.time())}"
+    active_pvp_challenges[user_id] = {
+        'challenge_id': challenge_id,
+        'created_at': time.time(),
+        'creator_name': user.first_name,
+        'creator_username': user.username,
+        'creator_id': user_id
+    }
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Принять вызов", callback_data=f"pvp_accept_{user_id}")],
+        [InlineKeyboardButton("❌ Отклонить", callback_data=f"pvp_decline_{user_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Отправляем сообщение с вызовом
+    try:
+        challenge_message = await query.message.reply_text(
+            f"*⚔️ PvP ВЫЗОВ!* ⚔️\n\n"
+            f"*{user.first_name}* вызывает тебя на битву команд!\n\n"
+            f"*Приз:* 100 монет 🪙\n"
+            f"*Ставка:* 50 монет с игрока\n"
+            f"*Правила:*\n"
+            f"• Каждому выдаётся 5 случайных персонажей\n"
+            f"• Выбери 3 в свою команду\n"
+            f"• Побеждает команда с большей силой!\n\n"
+            f"*Прими вызов и сразись!*",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        
+        await safe_edit_message(query,
+            f"*🎯 ВЫЗОВ СОЗДАН!* 🎯\n\n"
+            f"*Твой вызов отправлен!*\n\n"
+            f"*Отправь другу это сообщение или ссылку:*\n"
+            f"t.me/{context.bot.username}?start=pvp_{user_id}\n\n"
+            f"*Вызов активен 5 минут.* ⏰"
+        )
+        
+        # Запускаем таймер для автоматического удаления вызова
+        asyncio.create_task(pvp_challenge_timeout(user_id, context))
+        
+    except Exception as e:
+        logger.error(f"Error creating PvP challenge: {e}")
+        await safe_edit_message(query, "*❌ Ошибка при создании вызова!*")
+
+async def pvp_accept_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принятие PvP вызова"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        creator_id = int(query.data.split('_')[-1])
+    except (ValueError, IndexError):
+        await safe_edit_message(query, "*❌ Ошибка: неверный вызов*")
+        return
+    
+    user = query.from_user
+    user_id = user.id
+    
+    # Проверяем, не принимаем ли мы свой же вызов
+    if user_id == creator_id:
+        await safe_edit_message(query, "*❌ Нельзя принять свой же вызов!*")
+        return
+    
+    # Проверяем существование вызова
+    if creator_id not in active_pvp_challenges:
+        await safe_edit_message(query, "*❌ Вызов не найден или истек!*")
+        return
+    
+    creator_name = active_pvp_challenges[creator_id]['creator_name']
+    
+    # Проверяем баланс обоих игроков
+    creator_balance = get_user_balance_safe(creator_id)
+    acceptor_balance = get_user_balance_safe(user_id)
+    
+    if creator_balance < 50 or acceptor_balance < 50:
+        # Удаляем вызов
+        if creator_id in active_pvp_challenges:
+            del active_pvp_challenges[creator_id]
+        await safe_edit_message(query, "*❌ У одного из игроков недостаточно монет!*")
+        return
+    
+    # Списываем ставки
+    success1 = update_user_balance_safe(creator_id, -50)
+    success2 = update_user_balance_safe(user_id, -50)
+    
+    if not success1 or not success2:
+        await safe_edit_message(query, "*❌ Ошибка при списании ставок!*")
+        return
+    
+    # Генерируем случайные персонажи для обоих игроков
+    characters_list = list(CHARACTERS.keys())
+    
+    if len(characters_list) < 10:
+        await safe_edit_message(query, "*❌ Ошибка: недостаточно персонажей в базе*")
+        # Возвращаем средства
+        update_user_balance_safe(creator_id, 50)
+        update_user_balance_safe(user_id, 50)
+        return
+    
+    # Персонажи для создателя вызова
+    creator_characters = random.sample(characters_list, 5)
+    # Персонажи для принимающего (гарантируем разные наборы)
+    remaining_chars = [c for c in characters_list if c not in creator_characters]
+    if len(remaining_chars) < 5:
+        # Если недостаточно уникальных персонажей, добавляем случайные
+        acceptor_characters = random.sample(characters_list, 5)
+    else:
+        acceptor_characters = random.sample(remaining_chars, 5)
+    
+    # Сохраняем данные для выбора команд
+    battle_id = f"battle_{creator_id}_{user_id}_{int(time.time())}"
+    
+    pvp_team_selection[creator_id] = {
+        'battle_id': battle_id,
+        'opponent_id': user_id,
+        'characters': creator_characters,
+        'selected_team': [],
+        'player_name': creator_name,
+        'ready': False
+    }
+    
+    pvp_team_selection[user_id] = {
+        'battle_id': battle_id,
+        'opponent_id': creator_id,
+        'characters': acceptor_characters,
+        'selected_team': [],
+        'player_name': user.first_name,
+        'ready': False
+    }
+    
+    # Удаляем вызов
+    if creator_id in active_pvp_challenges:
+        del active_pvp_challenges[creator_id]
+    
+    # Отправляем создателю вызова меню выбора команды
+    await send_team_selection_menu(context, creator_id)
+    
+    # Отправляем принимающему меню выбора команды
+    await send_team_selection_menu(context, user_id)
+    
+    await safe_edit_message(query,
+        f"*✅ ВЫЗОВ ПРИНЯТ!* ✅\n\n"
+        f"*Ты принял вызов от {creator_name}!*\n\n"
+        f"*Теперь выбери 3 персонажа из 5 доступных для своей команды.*\n"
+        f"*С твоего счета списано 50 монет.* 💰"
+    )
+    
+    # Уведомляем создателя вызова
+    try:
+        await context.bot.send_message(
+            chat_id=creator_id,
+            text=f"*✅ ТВОЙ PvP ВЫЗОВ ПРИНЯТ!* ✅\n\n"
+                 f"*{user.first_name}* принял твой вызов!\n\n"
+                 f"*Теперь выбери 3 персонажа из 5 доступных для своей команды.*\n"
+                 f"*С твоего счета списано 50 монет.* 💰",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error notifying challenge creator: {e}")
+
+async def send_team_selection_menu(context, user_id):
+    """Отправляет меню выбора команды"""
+    if user_id not in pvp_team_selection:
+        return
+    
+    team_data = pvp_team_selection[user_id]
+    characters = team_data.get('characters', [])
+    
+    if not characters:
+        logger.error(f"No characters found for user {user_id}")
+        return
+    
+    # Создаем клавиатуру для выбора персонажей
+    keyboard = []
+    for i, char_name in enumerate(characters, 1):
+        char_data = CHARACTERS.get(char_name, {})
+        power = char_data.get('power', 0)
+        emoji = "✅" if char_name in team_data.get('selected_team', []) else "⚪"
+        button_text = f"{emoji} {char_name} ({power})"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"pvp_select_{user_id}_{i}")])
+    
+    # Кнопка подтверждения команды
+    selected_team = team_data.get('selected_team', [])
+    if len(selected_team) == 3:
+        keyboard.append([InlineKeyboardButton("🚀 Подтвердить команду", callback_data=f"pvp_confirm_{user_id}")])
+    
+    keyboard.append([InlineKeyboardButton("❌ Отменить битву", callback_data=f"pvp_cancel_battle_{user_id}")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    selected_count = len(selected_team)
+    team_power = sum(CHARACTERS.get(char, {}).get('power', 0) for char in selected_team)
+    
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"*⚔️ ВЫБОР КОМАНДЫ* ⚔️\n\n"
+                 f"*Выбери 3 персонажа для своей команды:*\n\n"
+                 f"*Доступные персонажи:*\n" +
+                 "\n".join([f"{i}. {char} ({CHARACTERS.get(char, {}).get('power', 0)} силы)" 
+                           for i, char in enumerate(characters, 1)]) +
+                 f"\n\n*Выбрано:* {selected_count}/3 персонажей\n"
+                 f"*Суммарная сила команды:* {team_power}\n\n"
+                 f"*Нажми на персонажа чтобы добавить/убрать из команды.*",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error sending team selection menu to {user_id}: {e}")
+
+async def pvp_select_character_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора персонажа в команду"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        data_parts = query.data.split('_')
+        target_user_id = int(data_parts[2])
+        char_index = int(data_parts[3]) - 1
+    except (ValueError, IndexError):
+        await safe_edit_message(query, "*❌ Ошибка выбора персонажа*")
+        return
+    
+    user_id = query.from_user.id
+    
+    # Проверяем, что пользователь выбирает своих персонажей
+    if user_id != target_user_id or user_id not in pvp_team_selection:
+        await safe_edit_message(query, "*❌ Ошибка доступа*")
+        return
+    
+    team_data = pvp_team_selection[user_id]
+    characters = team_data.get('characters', [])
+    
+    if char_index < 0 or char_index >= len(characters):
+        await safe_edit_message(query, "*❌ Неверный индекс персонажа*")
+        return
+    
+    selected_char = characters[char_index]
+    selected_team = team_data.get('selected_team', [])
+    
+    # Добавляем или убираем персонажа из команды
+    if selected_char in selected_team:
+        selected_team.remove(selected_char)
+    else:
+        if len(selected_team) < 3:
+            selected_team.append(selected_char)
+        else:
+            await query.answer("❌ Можно выбрать только 3 персонажа!", show_alert=True)
+            return
+    
+    team_data['selected_team'] = selected_team
+    
+    # Обновляем меню выбора
+    await send_team_selection_menu(context, user_id)
+    
+    # Удаляем старое сообщение
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+async def pvp_confirm_team_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждение выбранной команды"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        target_user_id = int(query.data.split('_')[2])
+    except (ValueError, IndexError):
+        await safe_edit_message(query, "*❌ Ошибка подтверждения*")
+        return
+    
+    user_id = query.from_user.id
+    
+    if user_id != target_user_id or user_id not in pvp_team_selection:
+        await safe_edit_message(query, "*❌ Ошибка доступа*")
+        return
+    
+    team_data = pvp_team_selection[user_id]
+    selected_team = team_data.get('selected_team', [])
+    
+    if len(selected_team) != 3:
+        await query.answer("❌ Выбери ровно 3 персонажа!", show_alert=True)
+        return
+    
+    # Помечаем, что игрок готов
+    team_data['ready'] = True
+    
+    team_power = sum(CHARACTERS.get(char, {}).get('power', 0) for char in selected_team)
+    
+    await safe_edit_message(query,
+        f"*✅ КОМАНДА ПОДТВЕРЖДЕНА!* ✅\n\n"
+        f"*Твоя команда:*\n" +
+        "\n".join([f"• {char} ({CHARACTERS.get(char, {}).get('power', 0)} силы)" 
+                  for char in selected_team]) +
+        f"\n\n*Суммарная сила:* {team_power}\n\n"
+        f"*Ожидаем подтверждения противника...*"
+    )
+    
+    # Проверяем, готовы ли оба игрока
+    opponent_id = team_data['opponent_id']
+    if opponent_id in pvp_team_selection and pvp_team_selection[opponent_id].get('ready'):
+        # Оба игрока готовы - начинаем битву
+        await start_pvp_battle(context, user_id, opponent_id)
+
+async def start_pvp_battle(context, player1_id, player2_id):
+    """Начинает PvP битву между двумя игроками"""
+    if player1_id not in pvp_team_selection or player2_id not in pvp_team_selection:
+        return
+    
+    player1_data = pvp_team_selection[player1_id]
+    player2_data = pvp_team_selection[player2_id]
+    
+    # Проверяем что команды выбраны
+    player1_team = player1_data.get('selected_team', [])
+    player2_team = player2_data.get('selected_team', [])
+    
+    if len(player1_team) != 3 or len(player2_team) != 3:
+        logger.error("Invalid team selection in PvP battle")
+        return
+    
+    # Вычисляем суммарную силу команд
+    team1_power = sum(CHARACTERS.get(char, {}).get('power', 0) for char in player1_team)
+    team2_power = sum(CHARACTERS.get(char, {}).get('power', 0) for char in player2_team)
+    
+    # Определяем победителя
+    if team1_power > team2_power:
+        winner_id = player1_id
+        loser_id = player2_id
+        winner_name = player1_data['player_name']
+        loser_name = player2_data['player_name']
+    elif team2_power > team1_power:
+        winner_id = player2_id
+        loser_id = player1_id
+        winner_name = player2_data['player_name']
+        loser_name = player1_data['player_name']
+    else:
+        # Ничья - случайный победитель
+        winner_id = random.choice([player1_id, player2_id])
+        loser_id = player2_id if winner_id == player1_id else player1_id
+        winner_name = player1_data['player_name'] if winner_id == player1_id else player2_data['player_name']
+        loser_name = player2_data['player_name'] if winner_id == player1_id else player1_data['player_name']
+    
+    # Начисляем выигрыш
+    update_user_balance_safe(winner_id, 100)
+    update_pvp_stats(winner_id, loser_id)
+    
+    # Обновляем статистику
+    update_user_score(winner_id, "", 5)
+    update_user_score(loser_id, "", 2)
+    
+    # Формируем детали битвы
+    battle_text = f"*⚔️ PvP БИТВА ЗАВЕРШЕНА!* ⚔️\n\n"
+    battle_text += f"*{player1_data['player_name']}* 🆚 *{player2_data['player_name']}*\n\n"
+    
+    battle_text += f"*Команда {player1_data['player_name']}:*\n"
+    for char in player1_team:
+        power = CHARACTERS.get(char, {}).get('power', 0)
+        battle_text += f"• {char} ({power} силы)\n"
+    battle_text += f"*Суммарно:* {team1_power} силы\n\n"
+    
+    battle_text += f"*Команда {player2_data['player_name']}:*\n"
+    for char in player2_team:
+        power = CHARACTERS.get(char, {}).get('power', 0)
+        battle_text += f"• {char} ({power} силы)\n"
+    battle_text += f"*Суммарно:* {team2_power} силы\n\n"
+    
+    battle_text += f"🏆 *ПОБЕДИТЕЛЬ:* **{winner_name}**\n"
+    battle_text += f"💰 *Выигрыш:* 100 монет!\n\n"
+    battle_text += f"*Новые балансы:*\n"
+    battle_text += f"• {winner_name}: `{get_user_balance_safe(winner_id)}` монет\n"
+    battle_text += f"• {loser_name}: `{get_user_balance_safe(loser_id)}` монет"
+    
+    # Отправляем результаты обоим игрокам
+    try:
+        await context.bot.send_message(chat_id=player1_id, text=battle_text, parse_mode='Markdown')
+        await context.bot.send_message(chat_id=player2_id, text=battle_text, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error sending battle results: {e}")
+    
+    # Очищаем данные о битве
+    if player1_id in pvp_team_selection:
+        del pvp_team_selection[player1_id]
+    if player2_id in pvp_team_selection:
+        del pvp_team_selection[player2_id]
+
+async def pvp_cancel_battle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена битвы во время выбора команды"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        target_user_id = int(query.data.split('_')[3])
+    except (ValueError, IndexError):
+        await safe_edit_message(query, "*❌ Ошибка отмены*")
+        return
+    
+    user_id = query.from_user.id
+    
+    if user_id != target_user_id or user_id not in pvp_team_selection:
+        await safe_edit_message(query, "*❌ Ошибка доступа*")
+        return
+    
+    team_data = pvp_team_selection[user_id]
+    opponent_id = team_data.get('opponent_id')
+    
+    if opponent_id:
+        # Возвращаем ставки
+        update_user_balance_safe(user_id, 50)
+        update_user_balance_safe(opponent_id, 50)
+    
+    # Очищаем данные
+    if user_id in pvp_team_selection:
+        del pvp_team_selection[user_id]
+    if opponent_id and opponent_id in pvp_team_selection:
+        del pvp_team_selection[opponent_id]
+    
+    await safe_edit_message(query, "*❌ Битва отменена. Ставки возвращены.*")
+    
+    # Уведомляем противника
+    if opponent_id:
+        try:
+            await context.bot.send_message(
+                chat_id=opponent_id,
+                text="*❌ Противник отменил битву. Ставки возвращены.*",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Error notifying opponent about battle cancel: {e}")
+
+async def pvp_decline_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отклонение PvP вызова"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        creator_id = int(query.data.split('_')[-1])
+    except (ValueError, IndexError):
+        await safe_edit_message(query, "*❌ Ошибка: неверный вызов*")
+        return
+    
+    # Удаляем вызов
+    if creator_id in active_pvp_challenges:
+        del active_pvp_challenges[creator_id]
+    
+    await safe_edit_message(query, "*❌ Вызов отклонен*")
+    
+    # Уведомляем создателя вызова
+    try:
+        await context.bot.send_message(
+            chat_id=creator_id,
+            text=f"*❌ Твой PvP вызов был отклонен*",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error notifying challenge creator about decline: {e}")
+
+async def pvp_cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена PvP вызова"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    if user_id in active_pvp_challenges:
+        del active_pvp_challenges[user_id]
+        await safe_edit_message(query, "*✅ Вызов отменен*")
+    else:
+        await safe_edit_message(query, "*❌ У тебя нет активных вызовов*")
+
+async def pvp_challenge_timeout(user_id, context):
+    """Таймаут для PvP вызова"""
+    await asyncio.sleep(300)  # 5 минут
+    
+    if user_id in active_pvp_challenges:
+        del active_pvp_challenges[user_id]
+        
+        # Уведомляем пользователя
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="*⏰ Время твоего PvP вызова истекло*",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Error notifying about challenge timeout: {e}")
 
 # === ЗАПУСК БОТА ===
 def main():
@@ -804,7 +1327,7 @@ def main():
         # Создание приложения
         application = Application.builder().token(BOT_TOKEN).build()
         
-        # ТОЛЬКО ОСНОВНЫЕ ОБРАБОТЧИКИ
+        # ОСНОВНЫЕ ОБРАБОТЧИКИ
         application.add_handler(CommandHandler("start", start))
         
         # Обработчики меню
@@ -816,9 +1339,23 @@ def main():
         application.add_handler(CallbackQueryHandler(choose_fighter_handler, pattern="^(choose_1|choose_2)$"))
         application.add_handler(CallbackQueryHandler(cancel_bet_handler, pattern="^cancel_bet$"))
         
-        print("Бот ставок запущен! 🎰")
-        print("Для остановки нажмите Ctrl+C")
+        # Обработчики PvP
+        application.add_handler(CallbackQueryHandler(pvp_create_handler, pattern="^pvp_create$"))
+        application.add_handler(CallbackQueryHandler(pvp_accept_handler, pattern="^pvp_accept_"))
+        application.add_handler(CallbackQueryHandler(pvp_decline_handler, pattern="^pvp_decline_"))
+        application.add_handler(CallbackQueryHandler(pvp_cancel_handler, pattern="^pvp_cancel$"))
+        application.add_handler(CallbackQueryHandler(pvp_select_character_handler, pattern="^pvp_select_"))
+        application.add_handler(CallbackQueryHandler(pvp_confirm_team_handler, pattern="^pvp_confirm_"))
+        application.add_handler(CallbackQueryHandler(pvp_cancel_battle_handler, pattern="^pvp_cancel_battle_"))
         
+        print("🎰 Бот ставок успешно запущен!")
+        print("⚔️ PvP система активирована")
+        print("💰 База данных инициализирована")
+        print("📊 Все обработчики настроены")
+        print("🤖 Бот готов к работе!")
+        print("\nДля остановки нажмите Ctrl+C")
+        
+        # Запуск бота
         application.run_polling(
             poll_interval=3,
             timeout=30,
@@ -826,7 +1363,7 @@ def main():
         )
         
     except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
+        logger.error(f"❌ Ошибка при запуске бота: {e}")
         sys.exit(1)
 
 if __name__ == '__main__':
