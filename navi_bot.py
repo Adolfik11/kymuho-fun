@@ -2419,8 +2419,10 @@ def main():
     try:
         init_db()
         
+        # Создаем Application с правильными настройками
         application = Application.builder().token(BOT_TOKEN).build()
         
+        # Добавляем обработчики команд
         application.add_handler(CommandHandler("start", start))
         
         # Обработчик проверки подписки
@@ -2458,18 +2460,24 @@ def main():
         print("🤖 Бот готов к работе!")
         print("\nДля остановки нажмите Ctrl+C")
         
+        # Запускаем бота с обработкой ошибок
         application.run_polling(
             poll_interval=3,
             timeout=30,
-            drop_pending_updates=True
+            drop_pending_updates=True,
+            allowed_updates=['message', 'callback_query']
         )
         
     except Exception as e:
         logger.error(f"❌ Ошибка при запуске бота: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == '__main__':
+    # Запускаем health check сервер в отдельном потоке
     health_thread = threading.Thread(target=start_health_check_server, daemon=True)
     health_thread.start()
     
+    # Запускаем бота
     main()
