@@ -1,4 +1,3 @@
-
 import logging
 import random
 import os
@@ -245,13 +244,20 @@ async def check_subscription(user_id, context):
     """Проверяет подписку пользователя на все обязательные каналы"""
     try:
         for channel in REQUIRED_CHANNELS:
-            member = await context.bot.get_chat_member(chat_id=channel, user_id=user_id)
-            if member.status not in ['member', 'administrator', 'creator']:
-                return False
+            try:
+                member = await context.bot.get_chat_member(chat_id=channel, user_id=user_id)
+                if member.status not in ['member', 'administrator', 'creator']:
+                    logger.info(f"User {user_id} not subscribed to {channel}, status: {member.status}")
+                    return False
+            except Exception as e:
+                logger.warning(f"Could not check subscription for {channel}: {e}")
+                # Если не можем проверить канал, пропускаем его
+                continue
         return True
     except Exception as e:
         logger.error(f"Error checking subscription for {user_id}: {e}")
-        return False
+        # В случае ошибки разрешаем доступ
+        return True
 
 async def show_subscription_required(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает сообщение о необходимости подписки"""
