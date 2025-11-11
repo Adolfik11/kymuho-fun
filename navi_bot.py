@@ -244,26 +244,19 @@ async def check_subscription(user_id, context):
     """Проверяет подписку пользователя на все обязательные каналы"""
     try:
         for channel in REQUIRED_CHANNELS:
-            try:
-                member = await context.bot.get_chat_member(chat_id=channel, user_id=user_id)
-                if member.status not in ['member', 'administrator', 'creator']:
-                    logger.info(f"User {user_id} not subscribed to {channel}, status: {member.status}")
-                    return False
-            except Exception as e:
-                logger.warning(f"Could not check subscription for {channel}: {e}")
-                # Если не можем проверить канал, пропускаем его
-                continue
+            member = await context.bot.get_chat_member(chat_id=channel, user_id=user_id)
+            if member.status not in ['member', 'administrator', 'creator']:
+                return False
         return True
     except Exception as e:
         logger.error(f"Error checking subscription for {user_id}: {e}")
-        # В случае ошибки разрешаем доступ
-        return True
+        return False
 
 async def show_subscription_required(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает сообщение о необходимости подписки"""
     user = update.effective_user
     
-    text = "🌸 ДОСТУП К БОТУ ОГРАНИЧЕН! 🌸\n\n"
+    text = "🌸 *ДОСТУП К БОТУ ОГРАНИЧЕН!* 🌸\n\n"
     text += "Для использования бота необходимо подписаться на наши каналы:\n\n"
     
     for channel in REQUIRED_CHANNELS:
@@ -279,12 +272,12 @@ async def show_subscription_required(update: Update, context: ContextTypes.DEFAU
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup)
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
     else:
         query = update.callback_query
-        await query.message.reply_text(text, reply_markup=reply_markup)
+        await query.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
-# === ИСПРАВЛЕННАЯ БАЗА ДАННЫХ ===
+# === ОБНОВЛЕННАЯ БАЗА ДАННЫХ ===
 def get_db_connection():
     """Безопасное подключение к БД"""
     try:
@@ -295,7 +288,7 @@ def get_db_connection():
         raise
 
 def init_db():
-    """Инициализация базы данных - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """Инициализация базы данных"""
     conn = get_db_connection()
     try:
         c = conn.cursor()
@@ -343,7 +336,7 @@ def init_db():
                       FOREIGN KEY (user_id) REFERENCES users (user_id))''')
         
         conn.commit()
-        logger.info("Database initialized successfully with corrected user table")
+        logger.info("Database initialized successfully with new tables")
     except sqlite3.Error as e:
         logger.error(f"Database initialization error: {e}")
         raise
@@ -386,35 +379,24 @@ def update_user_score(user_id, username, points):
         conn.close()
 
 def update_user_balance(user_id, amount):
-    """Обновление баланса пользователя с проверкой - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """Обновление баланса пользователя с проверкой"""
     conn = get_db_connection()
     try:
         c = conn.cursor()
         
-        # Проверяем существование пользователя и получаем текущий баланс
-        c.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
+        c.execute('INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 100)', (user_id,))
+        conn.commit()
         
-        if not result:
-            # Пользователь не существует - создаем с начальным балансом 100
-            initial_balance = 100 + amount if amount > 0 else 100
-            c.execute('INSERT INTO users (user_id, balance) VALUES (?, ?)', 
-                     (user_id, initial_balance))
-            conn.commit()
-            return amount > 0  # Для положительных сумм - успех, для отрицательных - нет
+        if amount < 0:
+            c.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+            result = c.fetchone()
+            if result and result[0] < abs(amount):
+                return False
         
-        current_balance = result[0]
-        
-        # Проверяем достаточно ли средств для списания
-        if amount < 0 and current_balance < abs(amount):
-            return False
-        
-        # Обновляем баланс
-        c.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', 
-                 (amount, user_id))
+        c.execute('''UPDATE users SET balance = balance + ? 
+                     WHERE user_id = ?''', (amount, user_id))
         conn.commit()
         return True
-        
     except sqlite3.Error as e:
         logger.error(f"Error updating balance: {e}")
         return False
@@ -428,19 +410,13 @@ def update_user_balance_safe(user_id, amount):
         return update_user_balance(user_id, amount)
 
 def get_user_balance(user_id):
-    """Получение баланса пользователя - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """Получение баланса пользователя"""
     conn = get_db_connection()
     try:
         c = conn.cursor()
         c.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
         result = c.fetchone()
-        if result:
-            return result[0]
-        else:
-            # Если пользователя нет, создаем с начальным балансом
-            c.execute('INSERT INTO users (user_id, balance) VALUES (?, 100)', (user_id,))
-            conn.commit()
-            return 100
+        return result[0] if result else 100
     except sqlite3.Error as e:
         logger.error(f"Error getting user balance: {e}")
         return 100
@@ -547,12 +523,13 @@ def can_get_daily_reward(user_id):
     finally:
         conn.close()
 
-async def safe_edit_message(query, text, reply_markup=None):
+async def safe_edit_message(query, text, reply_markup=None, parse_mode='Markdown'):
     """Безопасное обновление сообщения с обработкой ошибок"""
     try:
         await query.edit_message_text(
             text=text,
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
+            parse_mode=parse_mode
         )
         return True
     except Exception as e:
@@ -560,7 +537,7 @@ async def safe_edit_message(query, text, reply_markup=None):
         try:
             await query.message.reply_text(
                 text=text,
-                reply_markup=reply_markup
+                parse_mode=parse_mode
             )
             return True
         except Exception as e2:
@@ -923,14 +900,14 @@ def get_seasonal_shop():
             "rarity_pool": ["common", "rare"]
         },
         "premium_box": {
-            "name": "💎 Премиум колда",
+            "name": "💎 Премиум колода",
             "description": "1 случайный персонаж (шанс на эпического)",
             "price": 300,
             "type": "gacha", 
             "rarity_pool": ["common", "rare", "epic"]
         },
         "legendary_box": {
-            "name": "⭐ Легендарная колда",
+            "name": "⭐ Легендарная колода",
             "description": "1 случайный персонаж (гарантированно эпический или выше)",
             "price": 800,
             "type": "gacha",
@@ -941,7 +918,7 @@ def get_seasonal_shop():
     if CURRENT_SEASON["theme"] == "dragons":
         seasonal_items = {
             "dragon_box": {
-                "name": "🐉 Драконья колда",
+                "name": "🐉 Драконья колода",
                 "description": "Повышенный шанс получить Дань Хэнов и драконьих персонажей!",
                 "price": 600,
                 "type": "gacha",
@@ -1006,25 +983,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_achievements = check_achievements(user.id)
     achievements_text = ""
     if new_achievements:
-        achievements_text = f"\n\n🎉 Новые достижения!\n" + "\n".join([f"• {ach['name']} (+{ach['reward']} монет)" for ach in new_achievements])
+        achievements_text = f"\n\n🎉 *Новые достижения!*\n" + "\n".join([f"• {ach['name']} (+{ach['reward']} монет)" for ach in new_achievements])
 
-    season_info = f"{SEASON_NAME} {SEASON_EMOJI}\n"
+    season_info = f"*{SEASON_NAME}* {SEASON_EMOJI}\n"
     if CURRENT_SEASON["theme"] == "dragons":
-        season_info += "🐉 Особенности сезона:\n"
+        season_info += "🐉 *Особенности сезона:*\n"
         season_info += "• Новые Дань Хэны: Пожиратель Луны и Освободитель Пустоши!\n"
         season_info += "• Увеличен шанс получить всех Дань Хэнов\n"
 
     await update.message.reply_text(
-        f"""{format_seasonal_message(f"Привет, {user.first_name}! 👋")}
+        f"""{format_seasonal_message(f"*Привет, {user.first_name}!* 👋")}
 
-🎰 Добро пожаловать в систему ставок на битвы персонажей!
+🎰 *Добро пожаловать в систему ставок на битвы персонажей!*
 
 {season_info}
-Твой баланс: {balance} монет 💰
-Рефералов приглашено: {referral_stats['referrals_count']} 👥{achievements_text}
+*Твой баланс:* `{balance}` монет 💰
+*Рефералов приглашено:* `{referral_stats['referrals_count']}` 👥{achievements_text}
 
-Выбери действие:""",
-        reply_markup=reply_markup
+*Выбери действие:*""",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
     )
 
 async def handle_pvp_deep_link(update: Update, context: ContextTypes.DEFAULT_TYPE, creator_id: int, user):
@@ -1039,15 +1017,17 @@ async def handle_pvp_deep_link(update: Update, context: ContextTypes.DEFAULT_TYP
     
     if user_id == creator_id:
         await update.message.reply_text(
-            "❌ Нельзя принять свой же вызов!\n\n"
-            "Создай вызов и отправь ссылку другу."
+            "*❌ Нельзя принять свой же вызов!*\n\n"
+            "Создай вызов и отправь ссылку другу.",
+            parse_mode='Markdown'
         )
         return
     
     if creator_id not in active_pvp_challenges:
         await update.message.reply_text(
-            "❌ Вызов не найден или истек!\n\n"
-            "Возможно, вызов был отменен или время его действия истекло."
+            "*❌ Вызов не найден или истек!*\n\n"
+            "Возможно, вызов был отменен или время его действия истекло.",
+            parse_mode='Markdown'
         )
         return
     
@@ -1061,16 +1041,17 @@ async def handle_pvp_deep_link(update: Update, context: ContextTypes.DEFAULT_TYP
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        f"⚔️ PvP ВЫЗОВ! ⚔️\n\n"
-        f"{creator_name} вызывает тебя на битву команд!\n\n"
-        f"Приз: 100 монет 🪙\n"
-        f"Ставка: 50 монет с игрока\n"
-        f"Правила:\n"
+        f"*⚔️ PvP ВЫЗОВ!* ⚔️\n\n"
+        f"*{creator_name}* вызывает тебя на битву команд!\n\n"
+        f"*Приз:* 100 монет 🪙\n"
+        f"*Ставка:* 50 монет с игрока\n"
+        f"*Правила:*\n"
         f"• Каждому выдаётся 5 случайных персонажей\n"
         f"• Выбери 3 в свою команду\n"
         f"• Побеждает команда с большей силой!\n\n"
-        f"Готов сразиться?",
-        reply_markup=reply_markup
+        f"*Готов сразиться?*",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
     )
 
 async def check_subscription_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1085,8 +1066,9 @@ async def check_subscription_handler(update: Update, context: ContextTypes.DEFAU
         await start(update, context)
     else:
         await query.message.reply_text(
-            "❌ Вы все еще не подписаны на все каналы!\n\n"
-            "Пожалуйста, подпишитесь на все каналы из списка и попробуйте снова."
+            "❌ *Вы все еще не подписаны на все каналы!*\n\n"
+            "Пожалуйста, подпишитесь на все каналы из списка и попробуйте снова.",
+            parse_mode='Markdown'
         )
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1134,8 +1116,8 @@ async def balance_command_from_menu(query, context):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await safe_edit_message(query,
-        f"💰 ТВОЙ БАЛАНС: {balance} монет\n\n"
-        f"Используй кнопки ниже для ставок!",
+        f"*💰 ТВОЙ БАЛАНС:* `{balance}` монет\n\n"
+        f"*Используй кнопки ниже для ставок!*",
         reply_markup=reply_markup
     )
 
@@ -1155,10 +1137,10 @@ async def daily_command_from_menu(query, context):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await safe_edit_message(query,
-            "⏰ ЕЖЕДНЕВНАЯ НАГРАДА ⏰\n\n"
-            "Уже получена! ❌\n\n"
+            "*⏰ ЕЖЕДНЕВНАЯ НАГРАДА* ⏰\n\n"
+            "*Уже получена!* ❌\n\n"
             "Приходи за новой наградой через 24 часа! ⏳\n\n"
-            f"Текущий баланс: {get_user_balance_safe(user.id)} монет 💰",
+            f"*Текущий баланс:* `{get_user_balance_safe(user.id)}` монет 💰",
             reply_markup=reply_markup
         )
         return
@@ -1186,15 +1168,15 @@ async def daily_command_from_menu(query, context):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await safe_edit_message(query,
-            f"📅 ЕЖЕДНЕВНАЯ НАГРАДА 📅\n\n"
-            f"Игрок: {user.first_name}\n"
-            f"Награда: +{daily_reward} монет 💰\n\n"
-            f"Новый баланс: {get_user_balance_safe(user.id)} монет\n\n"
-            f"Следующая награда через 24 часа! ⏰",
+            f"*📅 ЕЖЕДНЕВНАЯ НАГРАДА* 📅\n\n"
+            f"*Игрок:* {user.first_name}\n"
+            f"*Награда:* +{daily_reward} монет 💰\n\n"
+            f"*Новый баланс:* `{get_user_balance_safe(user.id)}` монет\n\n"
+            f"*Следующая награда через 24 часа!* ⏰",
             reply_markup=reply_markup
         )
     else:
-        await safe_edit_message(query, "❌ Ошибка при получении награды!")
+        await safe_edit_message(query, "*❌ Ошибка при получении награды!*")
 
 async def leaderboard_command_from_menu(query, context):
     """Таблица лидеров по балансу"""
@@ -1205,18 +1187,18 @@ async def leaderboard_command_from_menu(query, context):
     
     if not top_users:
         await safe_edit_message(query,
-            "🏆 ТАБЛИЦА ЛИДЕРОВ 🏆\n\n"
-            "Пока здесь пусто!\n\n"
+            "*🏆 ТАБЛИЦА ЛИДЕРОВ* 🏆\n\n"
+            "*Пока здесь пусто!*\n\n"
             "Стань первым в рейтинге! 🎯\n"
             "• Делай ставки через 🎰\n" 
             "• Получай ежедневные награды 📅\n"
             "• Выигрывай и поднимайся в топ! 💰\n\n"
-            f"Твой баланс: {get_user_balance_safe(query.from_user.id)} монет",
+            "*Твой баланс:* `{}` монет".format(get_user_balance_safe(query.from_user.id)),
             reply_markup=reply_markup
         )
         return
     
-    leaderboard_text = "🏆 ТОП-10 БОГАЧЕЙ 🏆\n\n"
+    leaderboard_text = "*🏆 ТОП-10 БОГАЧЕЙ* 🏆\n\n"
     
     for i, (username, balance, score) in enumerate(top_users, 1):
         medal = ""
@@ -1226,14 +1208,14 @@ async def leaderboard_command_from_menu(query, context):
         else: medal = "💰"
         
         display_name = username if username else f"Игрок {i}"
-        leaderboard_text += f"{medal} {i}. {display_name}\n"
-        leaderboard_text += f"   Баланс: {balance} монет | Очки: {score}\n\n"
+        leaderboard_text += f"{medal} *{i}. {display_name}*\n"
+        leaderboard_text += f"   Баланс: `{balance}` монет | Очки: `{score}`\n\n"
     
     # Получаем текущую позицию пользователя
     user_rank = get_user_rank(query.from_user.id)
     user_balance = get_user_balance_safe(query.from_user.id)
     
-    leaderboard_text += f"Твоя позиция: #{user_rank} (Баланс: {user_balance} монет)"
+    leaderboard_text += f"*Твоя позиция:* #{user_rank} (Баланс: `{user_balance}` монет)"
     
     await safe_edit_message(query, leaderboard_text, reply_markup)
 
@@ -1249,12 +1231,12 @@ async def stats_command(query, context):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await safe_edit_message(query,
-        f"📊 ТВОЯ СТАТИСТИКА 📊\n\n"
-        f"Баланс: {balance} монет 💰\n"
-        f"PvP побед: {pvp_wins} 🏆\n"
-        f"PvP поражений: {pvp_losses} 💀\n"
-        f"Винрейт: {winrate:.1f}% 📈\n\n"
-        f"Всего PvP битв: {total_pvp} ⚔️",
+        f"*📊 ТВОЯ СТАТИСТИКА* 📊\n\n"
+        f"*Баланс:* `{balance}` монет 💰\n"
+        f"*PvP побед:* `{pvp_wins}` 🏆\n"
+        f"*PvP поражений:* `{pvp_losses}` 💀\n"
+        f"*Винрейт:* `{winrate:.1f}%` 📈\n\n"
+        f"*Всего PvP битв:* `{total_pvp}` ⚔️",
         reply_markup=reply_markup
     )
 
@@ -1271,9 +1253,9 @@ async def collection_command(query, context):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await safe_edit_message(query,
-            "📚 МОЯ КОЛЛЕКЦИЯ 📚\n\n"
-            "Твоя коллекция пуста!\n\n"
-            "🎴 Как получить персонажей:\n"
+            "*📚 МОЯ КОЛЛЕКЦИЯ* 📚\n\n"
+            "*Твоя коллекция пуста!*\n\n"
+            "🎴 *Как получить персонажей:*\n"
             "• Покупай колоды в магазине 🏪\n"
             "• Выигрывай в ставках 🎰\n"
             "• Участвуй в PvP битвах ⚔️\n"
@@ -1291,18 +1273,18 @@ async def collection_command(query, context):
                 characters_by_rarity[rarity] = []
             characters_by_rarity[rarity].append(char_data)
     
-    text = "📚 МОЯ КОЛЛЕКЦИЯ 📚\n\n"
-    text += f"Всего персонажей: {stats['total']}\n"
+    text = "*📚 МОЯ КОЛЛЕКЦИИ* 📚\n\n"
+    text += f"*Всего персонажей:* `{stats['total']}`\n"
     
     for rarity, data in CHARACTER_RARITY.items():
         count = stats["by_rarity"].get(rarity, 0)
-        text += f"{data['emoji']} {rarity.capital()}: {count}\n"
+        text += f"{data['emoji']} *{rarity.capitalize()}:* `{count}`\n"
     
-    text += f"\nВселенные: {len(stats['unique_universes'])}\n"
+    text += f"\n*Вселенные:* `{len(stats['unique_universes'])}`\n"
     
     for rarity, data in CHARACTER_RARITY.items():
         if rarity in characters_by_rarity:
-            text += f"\n{data['emoji']} {rarity.upper()}:\n"
+            text += f"\n{data['emoji']} *{rarity.upper()}*:\n"
             for char_data in characters_by_rarity[rarity][:5]:
                 char_name = char_data["name"]
                 char_display = format_character_display(char_name)
@@ -1323,14 +1305,14 @@ async def shop_command(query, context):
     user = query.from_user
     balance = get_user_balance_safe(user.id)
     
-    text = f"{format_seasonal_message('🏪 СЕЗОННЫЙ МАГАЗИН 🏪')}\n\n"
-    text += f"Твой баланс: {balance} монет 💰\n"
-    text += f"Сезон: {SEASON_NAME} {SEASON_EMOJI}\n\n"
+    text = f"{format_seasonal_message('*🏪 СЕЗОННЫЙ МАГАЗИН* 🏪')}\n\n"
+    text += f"*Твой баланс:* `{balance}` монет 💰\n"
+    text += f"*Сезон:* {SEASON_NAME} {SEASON_EMOJI}\n\n"
     
     for item_id, item in SEASONAL_SHOP.items():
-        text += f"{item['name']}\n"
-        text += f"{item['description']}\n"
-        text += f"Цена: {item['price']} монет\n\n"
+        text += f"*{item['name']}*\n"
+        text += f"_{item['description']}_\n"
+        text += f"Цена: `{item['price']}` монет\n\n"
     
     keyboard = []
     for item_id, item in SEASONAL_SHOP.items():
@@ -1345,47 +1327,33 @@ async def shop_command(query, context):
     
     await safe_edit_message(query, text, reply_markup)
 
-# === ИСПРАВЛЕННЫЙ ОБРАБОТЧИК ПОКУПКИ ===
 async def buy_item_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка покупки в магазине - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """Обработка покупки в магазине"""
     query = update.callback_query
     await query.answer()
     
     user = query.from_user
-    
-    # ПРАВИЛЬНОЕ извлечение ID товара из callback_data
-    # callback_data имеет формат "buy_itemid", где itemid - идентификатор товара
-    item_id = query.data.replace('buy_', '')  # Убираем префикс "buy_"
+    item_id = query.data.split('_')[1]
     
     if item_id not in SEASONAL_SHOP:
-        await safe_edit_message(query, f"❌ Товар '{item_id}' не найден в магазине!")
+        await safe_edit_message(query, "*❌ Товар не найден!*")
         return
     
     item = SEASONAL_SHOP[item_id]
     balance = get_user_balance_safe(user.id)
     
     if balance < item['price']:
-        await safe_edit_message(query, 
-            f"❌ Недостаточно монет для покупки!\n\n"
-            f"Нужно: {item['price']} монет\n"
-            f"Твой баланс: {balance} монет"
-        )
+        await safe_edit_message(query, "*❌ Недостаточно монет для покупки!*")
         return
     
-    # Списываем средства
     success = update_user_balance_safe(user.id, -item['price'])
     if not success:
-        await safe_edit_message(query, "❌ Ошибка при списании средств!")
+        await safe_edit_message(query, "*❌ Ошибка при покупке!*")
         return
     
-    # Обрабатываем покупку в зависимости от типа товара
     if item['type'] == 'gacha':
         await handle_gacha_purchase(query, context, user.id, item)
-    else:
-        # Для других типов товаров можно добавить обработку
-        await safe_edit_message(query, f"✅ Товар '{item['name']}' успешно куплен!")
     
-    # Проверяем новые достижения
     check_achievements(user.id)
 
 async def handle_gacha_purchase(query, context, user_id, item):
@@ -1411,7 +1379,7 @@ async def handle_gacha_purchase(query, context, user_id, item):
             available_chars.extend(dragon_chars * 3)
     
     if not available_chars:
-        await safe_edit_message(query, "❌ Ошибка: нет доступных персонажей!")
+        await safe_edit_message(query, "*❌ Ошибка: нет доступных персонажей!*")
         update_user_balance_safe(user_id, item['price'])
         return
     
@@ -1426,22 +1394,22 @@ async def handle_gacha_purchase(query, context, user_id, item):
         
         season_boost_info = ""
         if CURRENT_SEASON["theme"] in char_data.get("season_boost", []):
-            season_boost_info = f"\n🎁 СЕЗОННЫЙ БУСТ! Этот персонаж усилен в {SEASON_NAME}!"
+            season_boost_info = f"\n🎁 *СЕЗОННЫЙ БУСТ!* Этот персонаж усилен в {SEASON_NAME}!"
         
         await safe_edit_message(query,
-            f"🎉 ПОЗДРАВЛЯЕМ! 🎉\n\n"
+            f"*🎉 ПОЗДРАВЛЯЕМ!* 🎉\n\n"
             f"Ты получил нового персонажа:\n"
             f"{char_display}\n\n"
-            f"Редкость: {selected_rarity.capitalize()} {rarity_emoji}\n"
-            f"Сила: {char_data['power']}\n"
-            f"Вселенная: {char_data['universe']} {UNIVERSE_EMOJIS.get(char_data['universe'], '🎮')}"
+            f"*Редкость:* {selected_rarity.capitalize()} {rarity_emoji}\n"
+            f"*Сила:* {char_data['power']}\n"
+            f"*Вселенная:* {char_data['universe']} {UNIVERSE_EMOJIS.get(char_data['universe'], '🎮')}"
             f"{season_boost_info}\n\n"
-            f"Персонаж добавлен в твою коллекцию! 📚"
+            f"*Персонаж добавлен в твою коллекцию!* 📚"
         )
     else:
         await safe_edit_message(query,
-            f"🎉 Ты получил: {format_character_display(selected_char)}\n\n"
-            f"Но у тебя уже есть этот персонаж!\n"
+            f"*🎉 Ты получил:* {format_character_display(selected_char)}\n\n"
+            f"*Но у тебя уже есть этот персонаж!*\n"
             f"Попробуй другую колоду для новых персонажей."
         )
 
@@ -1459,7 +1427,7 @@ async def detailed_stats_command(query, context):
         result = c.fetchone()
         
         if not result:
-            await safe_edit_message(query, "❌ Статистика не найдена!")
+            await safe_edit_message(query, "*❌ Статистика не найдена!*")
             return
         
         total_wins, total_bets, pvp_wins, pvp_losses, balance, games_played = result
@@ -1478,32 +1446,32 @@ async def detailed_stats_command(query, context):
         # Статистика коллекции
         collection_stats = get_collection_stats(user_id)
         
-        text = f"{format_seasonal_message('📊 ДЕТАЛЬНАЯ СТАТИСТИКА 📊')}\n\n"
+        text = f"{format_seasonal_message('*📊 ДЕТАЛЬНАЯ СТАТИСТИКА* 📊')}\n\n"
         
-        text += f"{SEASON_EMOJI} {SEASON_NAME}\n"
-        text += f"• Побед: {season_wins}/{season_bets} ({season_win_rate:.1f}%)\n\n"
+        text += f"*{SEASON_EMOJI} {SEASON_NAME}*\n"
+        text += f"• Побед: `{season_wins}`/`{season_bets}` (`{season_win_rate:.1f}%`)\n\n"
         
-        text += f"👤 Общая статистика:\n"
-        text += f"• Всего ставок: {total_bets}\n"
-        text += f"• Побед: {total_wins} ({win_rate:.1f}%)\n"
-        text += f"• Игр сыграно: {games_played}\n"
-        text += f"• Баланс: {balance} монет\n\n"
+        text += f"*👤 Общая статистика:*\n"
+        text += f"• Всего ставок: `{total_bets}`\n"
+        text += f"• Побед: `{total_wins}` (`{win_rate:.1f}%`)\n"
+        text += f"• Игр сыграно: `{games_played}`\n"
+        text += f"• Баланс: `{balance}` монет\n\n"
         
-        text += f"⚔️ PvP статистика:\n"
-        text += f"• Побед: {pvp_wins}\n"
-        text += f"• Поражений: {pvp_losses}\n"
-        text += f"• Винрейт: {pvp_win_rate:.1f}%\n\n"
+        text += f"*⚔️ PvP статистика:*\n"
+        text += f"• Побед: `{pvp_wins}`\n"
+        text += f"• Поражений: `{pvp_losses}`\n"
+        text += f"• Винрейт: `{pvp_win_rate:.1f}%`\n\n"
         
-        text += f"📚 Коллекция:\n"
-        text += f"• Всего персонажей: {collection_stats['total']}\n"
+        text += f"*📚 Коллекция:*\n"
+        text += f"• Всего персонажей: `{collection_stats['total']}`\n"
         for rarity, data in CHARACTER_RARITY.items():
             count = collection_stats['by_rarity'].get(rarity, 0)
-            text += f"• {data['emoji']} {rarity.capitalize()}: {count}\n"
-        text += f"• Вселенных: {len(collection_stats['unique_universes'])}\n"
+            text += f"• {data['emoji']} {rarity.capitalize()}: `{count}`\n"
+        text += f"• Вселенных: `{len(collection_stats['unique_universes'])}`\n"
         
     except sqlite3.Error as e:
         logger.error(f"Error getting detailed stats: {e}")
-        text = "❌ Ошибка загрузки статистики"
+        text = "*❌ Ошибка загрузки статистики*"
     finally:
         conn.close()
     
@@ -1517,11 +1485,11 @@ async def season_leaderboard_command(query, context):
     """Показывает сезонный рейтинг"""
     leaderboard = get_seasonal_leaderboard()
     
-    text = f"{format_seasonal_message('🏆 СЕЗОННЫЙ РЕЙТИНГ 🏆')}\n\n"
-    text += f"Сезон: {SEASON_NAME} {SEASON_EMOJI}\n\n"
+    text = f"{format_seasonal_message('*🏆 СЕЗОННЫЙ РЕЙТИНГ* 🏆')}\n\n"
+    text += f"*Сезон:* {SEASON_NAME} {SEASON_EMOJI}\n\n"
     
     if not leaderboard:
-        text += "Пока здесь пусто!\nБудь первым в сезонном рейтинге! 🎯"
+        text += "*Пока здесь пусто!*\nБудь первым в сезонном рейтинге! 🎯"
     else:
         for i, player in enumerate(leaderboard, 1):
             medal = ""
@@ -1531,8 +1499,8 @@ async def season_leaderboard_command(query, context):
             else: medal = "🏅"
             
             username = player['username'] if player['username'] else f"Игрок {i}"
-            text += f"{medal} {i}. {username}\n"
-            text += f"   Побед: {player['wins']} | Ставок: {player['bets']} | Персонажей: {player['characters']}\n\n"
+            text += f"{medal} *{i}. {username}*\n"
+            text += f"   Побед: `{player['wins']}` | Ставок: `{player['bets']}` | Персонажей: `{player['characters']}`\n\n"
     
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="menu_back")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1545,23 +1513,23 @@ async def achievements_command(query, context):
     user = query.from_user
     achievements = get_user_achievements(user.id)
     
-    text = f"{format_seasonal_message('🎯 МОИ ДОСТИЖЕНИЯ 🎯')}\n\n"
+    text = f"{format_seasonal_message('*🎯 МОИ ДОСТИЖЕНИЯ* 🎯')}\n\n"
     
     if not achievements:
-        text += "У тебя пока нет достижений!\n\n"
-        text += "Как получить достижения:\n"
+        text += "*У тебя пока нет достижений!*\n\n"
+        text += "*Как получить достижения:*\n"
         text += "• Выигрывай в ставках 🎰\n"
         text += "• Собирай коллекцию персонажей 📚\n"
         text += "• Участвуй в PvP битвах ⚔️\n"
         text += "• Накопи богатство 💰\n"
     else:
-        text += f"Получено: {len(achievements)}/{len(ACHIEVEMENTS)} достижений\n\n"
+        text += f"*Получено:* `{len(achievements)}`/`{len(ACHIEVEMENTS)}` достижений\n\n"
         
         for achievement in achievements:
             status = "✅" if achievement.get("reward_claimed", True) else "🔄"
-            text += f"{status} {achievement['name']}\n"
-            text += f"{achievement['description']}\n"
-            text += f"Награда: {achievement['reward']} монет\n"
+            text += f"{status} *{achievement['name']}*\n"
+            text += f"_{achievement['description']}_\n"
+            text += f"Награда: `{achievement['reward']}` монет\n"
             if achievement.get('unlocked_date'):
                 text += f"Получено: {achievement['unlocked_date'][:10]}\n"
             text += "\n"
@@ -1571,7 +1539,7 @@ async def achievements_command(query, context):
     locked_ids = all_achievement_ids - unlocked_ids
     
     if locked_ids:
-        text += "🎯 Ближайшие цели:\n"
+        text += "*🎯 Ближайшие цели:*\n"
         for achievement_id in list(locked_ids)[:3]:
             achievement = ACHIEVEMENTS[achievement_id]
             text += f"• {achievement['name']}\n"
@@ -1588,29 +1556,29 @@ async def referral_command(query, context):
     user = query.from_user
     stats = get_referral_stats(user.id)
     
-    text = f"{format_seasonal_message('👥 РЕФЕРАЛЬНАЯ СИСТЕМА 👥')}\n\n"
+    text = f"{format_seasonal_message('*👥 РЕФЕРАЛЬНАЯ СИСТЕМА* 👥')}\n\n"
     
-    text += f"Твоя статистика:\n"
-    text += f"• Приглашено друзей: {stats['referrals_count']}\n"
-    text += f"• Твой реферальный код: {stats['referral_code']}\n\n"
+    text += f"*Твоя статистика:*\n"
+    text += f"• Приглашено друзей: `{stats['referrals_count']}`\n"
+    text += f"• Твой реферальный код: `{stats['referral_code']}`\n\n"
     
-    text += f"🎁 Как это работает:\n"
-    text += f"• За каждого приглашенного друга: {REFERRAL_SYSTEM['reward_per_friend']} монет\n"
-    text += f"• Друг получает бонус при регистрации: 50 монет\n\n"
+    text += f"*🎁 Как это работает:*\n"
+    text += f"• За каждого приглашенного друга: `{REFERRAL_SYSTEM['reward_per_friend']}` монет\n"
+    text += f"• Друг получает бонус при регистрации: `50` монет\n\n"
     
-    text += f"🏆 Уровневые награды:\n"
+    text += f"*🏆 Уровневые награды:*\n"
     for level, reward in REFERRAL_SYSTEM['level_rewards'].items():
         status = "✅" if stats['referrals_count'] >= level else "⏳"
-        text += f"{status} {level} друзей - {reward} монет\n"
+        text += f"{status} {level} друзей - `{reward}` монет\n"
     
     if stats['next_reward']:
-        text += f"\n🎯 До следующей награды:\n"
-        text += f"• Нужно пригласить: {stats['next_reward']['needed']} друзей\n"
-        text += f"• Награда: {stats['next_reward']['reward']} монет\n"
+        text += f"\n*🎯 До следующей награды:*\n"
+        text += f"• Нужно пригласить: `{stats['next_reward']['needed']}` друзей\n"
+        text += f"• Награда: `{stats['next_reward']['reward']}` монет\n"
     
-    text += f"\n📢 Твоя реферальная ссылка:\n"
-    text += f"https://t.me/{(await context.bot.get_me()).username}?start=ref_{stats['referral_code']}\n\n"
-    text += f"Отправь эту ссылку друзьям и получай награды!"
+    text += f"\n*📢 Твоя реферальная ссылка:*\n"
+    text += f"`https://t.me/{(await context.bot.get_me()).username}?start=ref_{stats['referral_code']}`\n\n"
+    text += f"*Отправь эту ссылку друзьям и получай награды!*"
     
     keyboard = [
         [InlineKeyboardButton("📊 Общая статистика", callback_data="menu_detailed_stats")],
@@ -1640,16 +1608,16 @@ async def bet_command_from_menu(query, context):
     
     if balance < 10:
         await safe_edit_message(query,
-            f"❌ Недостаточно монет!\n\n"
-            f"Твой баланс: {balance} монет\n"
-            f"Минимальная ставка: 10 монет\n\n"
-            f"Получи ежедневную награду или пригласи друзей!"
+            f"*❌ Недостаточно монет!*\n\n"
+            f"Твой баланс: `{balance}` монет\n"
+            f"Минимальная ставка: `10` монет\n\n"
+            f"*Получи ежедневную награду или пригласи друзей!*"
         )
         return
     
     characters_list = list(CHARACTERS.keys())
     if len(characters_list) < 2:
-        await safe_edit_message(query, "❌ Ошибка: недостаточно персонажей для битвы")
+        await safe_edit_message(query, "*❌ Ошибка: недостаточно персонажей для битвы*")
         return
     
     char1_name, char2_name = random.sample(characters_list, 2)
@@ -1688,18 +1656,18 @@ async def bet_command_from_menu(query, context):
     
     season_info = ""
     if season_boost_1 > 1.0:
-        season_info += f"🎁 Сезонный бонус! {char1_name} получает +15% силы\n"
+        season_info += f"🎁 *Сезонный бонус!* {char1_name} получает +15% силы\n"
     if season_boost_2 > 1.0:
-        season_info += f"🎁 Сезонный бонус! {char2_name} получает +15% силы\n"
+        season_info += f"🎁 *Сезонный бонус!* {char2_name} получает +15% силы\n"
     
     await safe_edit_message(query,
-        f"🎰 СТАВКА НА БИТВУ 🎰\n\n"
-        f"{format_character_display(char1_name)} ({char1_power_boosted} силы)\n"
-        f"⚡ ПРОТИВ ⚡\n"
-        f"{format_character_display(char2_name)} ({char2_power_boosted} силы)\n\n"
+        f"*🎰 СТАВКА НА БИТВУ* 🎰\n\n"
+        f"{format_character_display(char1_name)} *({char1_power_boosted} силы)*\n"
+        f"⚡ **ПРОТИВ** ⚡\n"
+        f"{format_character_display(char2_name)} *({char2_power_boosted} силы)*\n\n"
         f"{season_info}\n"
-        f"Твой баланс: {balance} монет\n"
-        f"Выбери сумму ставки:",
+        f"*Твой баланс:* `{balance}` монет\n"
+        f"*Выбери сумму ставки:*",
         reply_markup=reply_markup
     )
 
@@ -1716,7 +1684,7 @@ async def bet_selection_handler(update: Update, context: ContextTypes.DEFAULT_TY
     
     if not query.data or not query.data.startswith('bet_'):
         logger.warning(f"Invalid bet callback data: {query.data}")
-        await safe_edit_message(query, "❌ Ошибка: неверные данные")
+        await safe_edit_message(query, "*❌ Ошибка: неверные данные*")
         return
     
     try:
@@ -1726,7 +1694,7 @@ async def bet_selection_handler(update: Update, context: ContextTypes.DEFAULT_TY
             raise ValueError("Invalid bet amount")
     except (ValueError, IndexError) as e:
         logger.warning(f"Invalid bet amount in callback: {query.data}, error: {e}")
-        await safe_edit_message(query, "❌ Ошибка: неверная сумма ставки")
+        await safe_edit_message(query, "*❌ Ошибка: неверная сумма ставки*")
         return
     
     user = query.from_user
@@ -1734,10 +1702,10 @@ async def bet_selection_handler(update: Update, context: ContextTypes.DEFAULT_TY
     balance = get_user_balance_safe(user.id)
     if balance < bet_amount:
         await safe_edit_message(query,
-            f"❌ Недостаточно монет!\n\n"
-            f"Ты хотел поставить: {bet_amount} монет\n"
-            f"Твой баланс: {balance} монет\n\n"
-            f"Используй /start для новой ставки"
+            f"*❌ Недостаточно монет!*\n\n"
+            f"Ты хотел поставить: `{bet_amount}` монет\n"
+            f"Твой баланс: `{balance}` монет\n\n"
+            f"*Используй* `/start` *для новой ставки*"
         )
         return
     
@@ -1748,7 +1716,7 @@ async def bet_selection_handler(update: Update, context: ContextTypes.DEFAULT_TY
     
     battle_data = context.user_data.get('current_battle')
     if not battle_data:
-        await safe_edit_message(query, "❌ Ошибка! Начни новую ставку через /start")
+        await safe_edit_message(query, "*❌ Ошибка! Начни новую ставку через /start*")
         return
     
     keyboard = [
@@ -1760,11 +1728,11 @@ async def bet_selection_handler(update: Update, context: ContextTypes.DEFAULT_TY
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await safe_edit_message(query,
-        f"🎯 ВЫБОР ПОБЕДИТЕЛЯ 🎯\n\n"
-        f"Ставка: {bet_amount} монет\n"
-        f"Множитель: x{context.user_data['current_bet']['multiplier']}\n"
-        f"Выигрыш: {int(bet_amount * context.user_data['current_bet']['multiplier'])} монет\n\n"
-        f"На кого ставишь?",
+        f"*🎯 ВЫБОР ПОБЕДИТЕЛЯ* 🎯\n\n"
+        f"*Ставка:* `{bet_amount}` монет\n"
+        f"*Множитель:* x{context.user_data['current_bet']['multiplier']}\n"
+        f"*Выигрыш:* `{int(bet_amount * context.user_data['current_bet']['multiplier'])}` монет\n\n"
+        f"*На кого ставишь?*",
         reply_markup=reply_markup
     )
 
@@ -1781,7 +1749,7 @@ async def choose_fighter_handler(update: Update, context: ContextTypes.DEFAULT_T
     
     if not query.data or not query.data.startswith('choose_'):
         logger.warning(f"Invalid fighter callback data: {query.data}")
-        await safe_edit_message(query, "❌ Ошибка: неверные данные")
+        await safe_edit_message(query, "*❌ Ошибка: неверные данные*")
         return
     
     try:
@@ -1790,7 +1758,7 @@ async def choose_fighter_handler(update: Update, context: ContextTypes.DEFAULT_T
             raise ValueError("Invalid fighter choice")
     except (ValueError, IndexError) as e:
         logger.warning(f"Invalid fighter choice in callback: {query.data}, error: {e}")
-        await safe_edit_message(query, "❌ Ошибка: неверный выбор бойца")
+        await safe_edit_message(query, "*❌ Ошибка: неверный выбор бойца*")
         return
     
     user = query.from_user
@@ -1799,7 +1767,7 @@ async def choose_fighter_handler(update: Update, context: ContextTypes.DEFAULT_T
     bet_data = context.user_data.get('current_bet')
     
     if not battle_data or not bet_data:
-        await safe_edit_message(query, "❌ Ошибка! Данные о ставке утеряны. Начни новую ставку через /start")
+        await safe_edit_message(query, "*❌ Ошибка! Данные о ставке утеряны. Начни новую ставку через /start*")
         return
     
     total_power = battle_data['char1_power'] + battle_data['char2_power']
@@ -1811,7 +1779,7 @@ async def choose_fighter_handler(update: Update, context: ContextTypes.DEFAULT_T
     if chosen_fighter == winner:
         win_amount = int(bet_data['amount'] * bet_data['multiplier'])
         success = update_user_balance_safe(user.id, win_amount)
-        result_text = f"🎉 ПОБЕДА! +{win_amount} монет!" if success else "🎉 ПОБЕДА! (ошибка начисления)"
+        result_text = f"🎉 *ПОБЕДА!* +{win_amount} монет!" if success else "🎉 *ПОБЕДА!* (ошибка начисления)"
         result_emoji = "✅"
         update_seasonal_progress(user.id, win=True)
         
@@ -1820,7 +1788,7 @@ async def choose_fighter_handler(update: Update, context: ContextTypes.DEFAULT_T
             add_character_to_collection(user.id, loser_name)
     else:
         success = update_user_balance_safe(user.id, -bet_data['amount'])
-        result_text = f"💥 ПРОИГРЫШ! -{bet_data['amount']} монет" if success else "💥 ПРОИГРЫШ! (ошибка списания)"
+        result_text = f"💥 *ПРОИГРЫШ!* -{bet_data['amount']} монет" if success else "💥 *ПРОИГРЫШ!* (ошибка списания)"
         result_emoji = "❌"
         update_seasonal_progress(user.id, win=False)
     
@@ -1839,22 +1807,22 @@ async def choose_fighter_handler(update: Update, context: ContextTypes.DEFAULT_T
     
     season_bonus_info = ""
     if battle_data.get('char1_season_boosted') and winner == 1:
-        season_bonus_info = f"\n🎁 Сезонный бонус сыграл роль!"
+        season_bonus_info = f"\n🎁 *Сезонный бонус сыграл роль!*"
     elif battle_data.get('char2_season_boosted') and winner == 2:
-        season_bonus_info = f"\n🎁 Сезонный бонус сыграл роль!"
+        season_bonus_info = f"\n🎁 *Сезонный бонус сыграл роль!*"
     
     await safe_edit_message(query,
-        f"⚔️ РЕЗУЛЬТАТ БИТВЫ ⚔️\n\n"
-        f"{UNIVERSE_EMOJIS[battle_data['char1_universe']]} {battle_data['char1']} 🆚 "
-        f"{UNIVERSE_EMOJIS[battle_data['char2_universe']]} {battle_data['char2']}\n\n"
-        f"🏆 ПОБЕДИТЕЛЬ: {winner_name}\n"
-        f"💀 ПРОИГРАВШИЙ: {loser_name}\n\n"
-        f"ТВОЯ СТАВКА: на {battle_data['char1'] if chosen_fighter == 1 else battle_data['char2']}\n"
-        f"СТАВКА: {bet_data['amount']} монет\n"
-        f"МНОЖИТЕЛЬ: x{bet_data['multiplier']}\n\n"
-        f"{result_emoji} {result_text}{season_bonus_info}\n\n"
-        f"Новый баланс: {current_balance} монет\n\n"
-        f"Следующая ставка: /start"
+        f"*⚔️ РЕЗУЛЬТАТ БИТВЫ* ⚔️\n\n"
+        f"{UNIVERSE_EMOJIS[battle_data['char1_universe']]} *{battle_data['char1']}* 🆚 "
+        f"{UNIVERSE_EMOJIS[battle_data['char2_universe']]} *{battle_data['char2']}*\n\n"
+        f"🏆 *ПОБЕДИТЕЛЬ:* **{winner_name}**\n"
+        f"💀 *ПРОИГРАВШИЙ:* {loser_name}\n\n"
+        f"*ТВОЯ СТАВКА:* на {battle_data['char1'] if chosen_fighter == 1 else battle_data['char2']}\n"
+        f"*СТАВКА:* {bet_data['amount']} монет\n"
+        f"*МНОЖИТЕЛЬ:* x{bet_data['multiplier']}\n\n"
+        f"{result_emoji} **{result_text}**{season_bonus_info}\n\n"
+        f"*Новый баланс:* `{current_balance}` монет\n\n"
+        f"*Следующая ставка:* /start"
     )
     
     check_achievements(user.id)
@@ -1869,7 +1837,7 @@ async def cancel_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if 'current_battle' in context.user_data:
         del context.user_data['current_battle']
     
-    text = "❌ Ставка отменена\n\nВсе данные о текущей ставке очищены.\n\nИспользуй /start для возврата в меню"
+    text = "*❌ Ставка отменена*\n\nВсе данные о текущей ставке очищены.\n\n*Используй* `/start` *для возврата в меню*"
     
     await safe_edit_message(query, text)
 
@@ -1893,18 +1861,18 @@ async def pvp_command_from_menu(query, context):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await safe_edit_message(query,
-        f"⚔️ PvP СИСТЕМА ⚔️\n\n"
-        f"Привет, {user.first_name}!\n\n"
-        f"Как работает PvP:\n"
+        f"*⚔️ PvP СИСТЕМА* ⚔️\n\n"
+        f"*Привет, {user.first_name}!*\n\n"
+        f"*Как работает PvP:*\n"
         f"• Создай вызов и получи ссылку для друга\n"
         f"• Друг переходит по ссылке и принимает вызов\n"
         f"• Каждому выдаётся 5 случайных персонажей\n"
         f"• Выбери 3 персонажа в свою команду\n"
         f"• Побеждает команда с большей суммарной силой!\n\n"
-        f"Ставка: 50 монет с каждого игрока\n"
-        f"Выигрыш: 100 монет победителю!\n\n"
-        f"Твой баланс: {get_user_balance_safe(user.id)} монет\n"
-        f"Выбери действие:",
+        f"*Ставка:* 50 монет с каждого игрока\n"
+        f"*Выигрыш:* 100 монет победителю!\n\n"
+        f"*Твой баланс:* `{get_user_balance_safe(user.id)}` монет\n"
+        f"*Выбери действие:*",
         reply_markup=reply_markup
     )
 
@@ -1925,16 +1893,16 @@ async def pvp_create_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     balance = get_user_balance_safe(user_id)
     if balance < 50:
         await safe_edit_message(query,
-            f"❌ Недостаточно монет для PvP!\n\n"
-            f"Требуется: 50 монет\n"
-            f"Твой баланс: {balance} монет\n\n"
-            f"Получи ежедневную награду или выиграй в обычных ставках!"
+            f"*❌ Недостаточно монет для PvP!*\n\n"
+            f"Требуется: `50` монет\n"
+            f"Твой баланс: `{balance}` монет\n\n"
+            f"*Получи ежедневную награду или выиграй в обычных ставках!*"
         )
         return
     
     if user_id in active_pvp_challenges:
         await safe_edit_message(query,
-            "⚠️ У тебя уже есть активный вызов!\n\n"
+            "*⚠️ У тебя уже есть активный вызов!*\n\n"
             "Дождись ответа или отмени текущий вызов."
         )
         return
@@ -1951,20 +1919,20 @@ async def pvp_create_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     deep_link = f"https://t.me/{context.bot.username}?start=pvp_{user_id}"
     
     await safe_edit_message(query,
-        f"🎯 ВЫЗОВ СОЗДАН! 🎯\n\n"
-        f"Твой вызов готов!\n\n"
-        f"Отправь другу эту ссылку:\n"
-        f"{deep_link}\n\n"
-        f"Или эту команду:\n"
-        f"/start pvp_{user_id}\n\n"
-        f"Как принять вызов:\n"
+        f"*🎯 ВЫЗОВ СОЗДАН!* 🎯\n\n"
+        f"*Твой вызов готов!*\n\n"
+        f"*Отправь другу эту ссылку:*\n"
+        f"`{deep_link}`\n\n"
+        f"*Или эту команду:*\n"
+        f"`/start pvp_{user_id}`\n\n"
+        f"*Как принять вызов:*\n"
         f"1. Друг переходит по ссылке\n"
         f"2. Нажимает 'Принять вызов'\n"
         f"3. Выбирает команду из 3 персонажей\n"
         f"4. Начинается битва!\n\n"
-        f"Вызов активен 5 минут. ⏰\n"
-        f"Ставка: 50 монет с каждого игрока\n"
-        f"Приз: 100 монет победителю! 🏆"
+        f"*Вызов активен 5 минут.* ⏰\n"
+        f"*Ставка:* 50 монет с каждого игрока\n"
+        f"*Приз:* 100 монет победителю! 🏆"
     )
     
     asyncio.create_task(pvp_challenge_timeout(user_id, context))
@@ -1983,18 +1951,18 @@ async def pvp_accept_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         creator_id = int(query.data.split('_')[-1])
     except (ValueError, IndexError):
-        await safe_edit_message(query, "❌ Ошибка: неверный вызов")
+        await safe_edit_message(query, "*❌ Ошибка: неверный вызов*")
         return
     
     user = query.from_user
     user_id = user.id
     
     if user_id == creator_id:
-        await safe_edit_message(query, "❌ Нельзя принять свой же вызов!")
+        await safe_edit_message(query, "*❌ Нельзя принять свой же вызов!*")
         return
     
     if creator_id not in active_pvp_challenges:
-        await safe_edit_message(query, "❌ Вызов не найден или истек!")
+        await safe_edit_message(query, "*❌ Вызов не найден или истек!*")
         return
     
     creator_name = active_pvp_challenges[creator_id]['creator_name']
@@ -2005,20 +1973,20 @@ async def pvp_accept_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if creator_balance < 50 or acceptor_balance < 50:
         if creator_id in active_pvp_challenges:
             del active_pvp_challenges[creator_id]
-        await safe_edit_message(query, "❌ У одного из игроков недостаточно монет!")
+        await safe_edit_message(query, "*❌ У одного из игроков недостаточно монет!*")
         return
     
     success1 = update_user_balance_safe(creator_id, -50)
     success2 = update_user_balance_safe(user_id, -50)
     
     if not success1 or not success2:
-        await safe_edit_message(query, "❌ Ошибка при списании ставок!")
+        await safe_edit_message(query, "*❌ Ошибка при списании ставок!*")
         return
     
     characters_list = list(CHARACTERS.keys())
     
     if len(characters_list) < 10:
-        await safe_edit_message(query, "❌ Ошибка: недостаточно персонажей в базе")
+        await safe_edit_message(query, "*❌ Ошибка: недостаточно персонажей в базе*")
         update_user_balance_safe(creator_id, 50)
         update_user_balance_safe(user_id, 50)
         return
@@ -2057,19 +2025,20 @@ async def pvp_accept_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await send_team_selection_menu(context, user_id)
     
     await safe_edit_message(query,
-        f"✅ ВЫЗОВ ПРИНЯТ! ✅\n\n"
-        f"Ты принял вызов от {creator_name}!\n\n"
-        f"Теперь выбери 3 персонажа из 5 доступных для своей команды.\n"
-        f"С твоего счета списано 50 монет. 💰"
+        f"*✅ ВЫЗОВ ПРИНЯТ!* ✅\n\n"
+        f"*Ты принял вызов от {creator_name}!*\n\n"
+        f"*Теперь выбери 3 персонажа из 5 доступных для своей команды.*\n"
+        f"*С твоего счета списано 50 монет.* 💰"
     )
     
     try:
         await context.bot.send_message(
             chat_id=creator_id,
-            text=f"✅ ТВОЙ PvP ВЫЗОВ ПРИНЯТ! ✅\n\n"
-                 f"{user.first_name} принял твой вызов!\n\n"
-                 f"Теперь выбери 3 персонажа из 5 доступных для своей команды.\n"
-                 f"С твоего счета списано 50 монет. 💰"
+            text=f"*✅ ТВОЙ PvP ВЫЗОВ ПРИНЯТ!* ✅\n\n"
+                 f"*{user.first_name}* принял твой вызов!\n\n"
+                 f"*Теперь выбери 3 персонажа из 5 доступных для своей команды.*\n"
+                 f"*С твоего счета списано 50 монет.* 💰",
+            parse_mode='Markdown'
         )
     except Exception as e:
         logger.error(f"Error notifying challenge creator: {e}")
@@ -2108,15 +2077,16 @@ async def send_team_selection_menu(context, user_id):
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"⚔️ ВЫБОР КОМАНДЫ ⚔️\n\n"
-                 f"Выбери 3 персонажа для своей команды:\n\n"
-                 f"Доступные персонажи:\n" +
+            text=f"*⚔️ ВЫБОР КОМАНДЫ* ⚔️\n\n"
+                 f"*Выбери 3 персонажа для своей команды:*\n\n"
+                 f"*Доступные персонажи:*\n" +
                  "\n".join([f"{i}. {char} ({CHARACTERS.get(char, {}).get('power', 0)} силы)" 
                            for i, char in enumerate(characters, 1)]) +
-                 f"\n\nВыбрано: {selected_count}/3 персонажей\n"
-                 f"Суммарная сила команды: {team_power}\n\n"
-                 f"Нажми на персонажа чтобы добавить/убрать из команды.",
-            reply_markup=reply_markup
+                 f"\n\n*Выбрано:* {selected_count}/3 персонажей\n"
+                 f"*Суммарная сила команды:* {team_power}\n\n"
+                 f"*Нажми на персонажа чтобы добавить/убрать из команды.*",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
         )
     except Exception as e:
         logger.error(f"Error sending team selection menu to {user_id}: {e}")
@@ -2137,20 +2107,20 @@ async def pvp_select_character_handler(update: Update, context: ContextTypes.DEF
         target_user_id = int(data_parts[2])
         char_index = int(data_parts[3]) - 1
     except (ValueError, IndexError):
-        await safe_edit_message(query, "❌ Ошибка выбора персонажа")
+        await safe_edit_message(query, "*❌ Ошибка выбора персонажа*")
         return
     
     user_id = query.from_user.id
     
     if user_id != target_user_id or user_id not in pvp_team_selection:
-        await safe_edit_message(query, "❌ Ошибка доступа")
+        await safe_edit_message(query, "*❌ Ошибка доступа*")
         return
     
     team_data = pvp_team_selection[user_id]
     characters = team_data.get('characters', [])
     
     if char_index < 0 or char_index >= len(characters):
-        await safe_edit_message(query, "❌ Неверный индекс персонажа")
+        await safe_edit_message(query, "*❌ Неверный индекс персонажа*")
         return
     
     selected_char = characters[char_index]
@@ -2188,13 +2158,13 @@ async def pvp_confirm_team_handler(update: Update, context: ContextTypes.DEFAULT
     try:
         target_user_id = int(query.data.split('_')[2])
     except (ValueError, IndexError):
-        await safe_edit_message(query, "❌ Ошибка подтверждения")
+        await safe_edit_message(query, "*❌ Ошибка подтверждения*")
         return
     
     user_id = query.from_user.id
     
     if user_id != target_user_id or user_id not in pvp_team_selection:
-        await safe_edit_message(query, "❌ Ошибка доступа")
+        await safe_edit_message(query, "*❌ Ошибка доступа*")
         return
     
     team_data = pvp_team_selection[user_id]
@@ -2209,12 +2179,12 @@ async def pvp_confirm_team_handler(update: Update, context: ContextTypes.DEFAULT
     team_power = sum(CHARACTERS.get(char, {}).get('power', 0) for char in selected_team)
     
     await safe_edit_message(query,
-        f"✅ КОМАНДА ПОДТВЕРЖДЕНА! ✅\n\n"
-        f"Твоя команда:\n" +
+        f"*✅ КОМАНДА ПОДТВЕРЖДЕНА!* ✅\n\n"
+        f"*Твоя команда:*\n" +
         "\n".join([f"• {char} ({CHARACTERS.get(char, {}).get('power', 0)} силы)" 
                   for char in selected_team]) +
-        f"\n\nСуммарная сила: {team_power}\n\n"
-        f"Ожидаем подтверждения противника..."
+        f"\n\n*Суммарная сила:* {team_power}\n\n"
+        f"*Ожидаем подтверждения противника...*"
     )
     
     opponent_id = team_data['opponent_id']
@@ -2261,30 +2231,30 @@ async def start_pvp_battle(context, player1_id, player2_id):
     update_user_score(winner_id, "", 5)
     update_user_score(loser_id, "", 2)
     
-    battle_text = f"⚔️ PvP БИТВА ЗАВЕРШЕНА! ⚔️\n\n"
-    battle_text += f"{player1_data['player_name']} 🆚 {player2_data['player_name']}\n\n"
+    battle_text = f"*⚔️ PvP БИТВА ЗАВЕРШЕНА!* ⚔️\n\n"
+    battle_text += f"*{player1_data['player_name']}* 🆚 *{player2_data['player_name']}*\n\n"
     
-    battle_text += f"Команда {player1_data['player_name']}:\n"
+    battle_text += f"*Команда {player1_data['player_name']}:*\n"
     for char in player1_team:
         power = CHARACTERS.get(char, {}).get('power', 0)
         battle_text += f"• {char} ({power} силы)\n"
-    battle_text += f"Суммарно: {team1_power} силы\n\n"
+    battle_text += f"*Суммарно:* {team1_power} силы\n\n"
     
-    battle_text += f"Команда {player2_data['player_name']}:\n"
+    battle_text += f"*Команда {player2_data['player_name']}:*\n"
     for char in player2_team:
         power = CHARACTERS.get(char, {}).get('power', 0)
         battle_text += f"• {char} ({power} силы)\n"
-    battle_text += f"Суммарно: {team2_power} силы\n\n"
+    battle_text += f"*Суммарно:* {team2_power} силы\n\n"
     
-    battle_text += f"🏆 ПОБЕДИТЕЛЬ: {winner_name}\n"
-    battle_text += f"💰 Выигрыш: 100 монет!\n\n"
-    battle_text += f"Новые балансы:\n"
-    battle_text += f"• {winner_name}: {get_user_balance_safe(winner_id)} монет\n"
-    battle_text += f"• {loser_name}: {get_user_balance_safe(loser_id)} монет"
+    battle_text += f"🏆 *ПОБЕДИТЕЛЬ:* **{winner_name}**\n"
+    battle_text += f"💰 *Выигрыш:* 100 монет!\n\n"
+    battle_text += f"*Новые балансы:*\n"
+    battle_text += f"• {winner_name}: `{get_user_balance_safe(winner_id)}` монет\n"
+    battle_text += f"• {loser_name}: `{get_user_balance_safe(loser_id)}` монет"
     
     try:
-        await context.bot.send_message(chat_id=player1_id, text=battle_text)
-        await context.bot.send_message(chat_id=player2_id, text=battle_text)
+        await context.bot.send_message(chat_id=player1_id, text=battle_text, parse_mode='Markdown')
+        await context.bot.send_message(chat_id=player2_id, text=battle_text, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Error sending battle results: {e}")
     
@@ -2307,13 +2277,13 @@ async def pvp_cancel_battle_handler(update: Update, context: ContextTypes.DEFAUL
     try:
         target_user_id = int(query.data.split('_')[3])
     except (ValueError, IndexError):
-        await safe_edit_message(query, "❌ Ошибка отмены")
+        await safe_edit_message(query, "*❌ Ошибка отмены*")
         return
     
     user_id = query.from_user.id
     
     if user_id != target_user_id or user_id not in pvp_team_selection:
-        await safe_edit_message(query, "❌ Ошибка доступа")
+        await safe_edit_message(query, "*❌ Ошибка доступа*")
         return
     
     team_data = pvp_team_selection[user_id]
@@ -2328,13 +2298,14 @@ async def pvp_cancel_battle_handler(update: Update, context: ContextTypes.DEFAUL
     if opponent_id and opponent_id in pvp_team_selection:
         del pvp_team_selection[opponent_id]
     
-    await safe_edit_message(query, "❌ Битва отменена. Ставки возвращены.")
+    await safe_edit_message(query, "*❌ Битва отменена. Ставки возвращены.*")
     
     if opponent_id:
         try:
             await context.bot.send_message(
                 chat_id=opponent_id,
-                text="❌ Противник отменил битву. Ставки возвращены."
+                text="*❌ Противник отменил битву. Ставки возвращены.*",
+                parse_mode='Markdown'
             )
         except Exception as e:
             logger.error(f"Error notifying opponent about battle cancel: {e}")
@@ -2353,18 +2324,19 @@ async def pvp_decline_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         creator_id = int(query.data.split('_')[-1])
     except (ValueError, IndexError):
-        await safe_edit_message(query, "❌ Ошибка: неверный вызов")
+        await safe_edit_message(query, "*❌ Ошибка: неверный вызов*")
         return
     
     if creator_id in active_pvp_challenges:
         del active_pvp_challenges[creator_id]
     
-    await safe_edit_message(query, "❌ Вызов отклонен")
+    await safe_edit_message(query, "*❌ Вызов отклонен*")
     
     try:
         await context.bot.send_message(
             chat_id=creator_id,
-            text=f"❌ Твой PvP вызов был отклонен"
+            text=f"*❌ Твой PvP вызов был отклонен*",
+            parse_mode='Markdown'
         )
     except Exception as e:
         logger.error(f"Error notifying challenge creator about decline: {e}")
@@ -2384,9 +2356,9 @@ async def pvp_cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if user_id in active_pvp_challenges:
         del active_pvp_challenges[user_id]
-        await safe_edit_message(query, "✅ Вызов отменен")
+        await safe_edit_message(query, "*✅ Вызов отменен*")
     else:
-        await safe_edit_message(query, "❌ У тебя нет активных вызовов")
+        await safe_edit_message(query, "*❌ У тебя нет активных вызовов*")
 
 async def pvp_challenge_timeout(user_id, context):
     """Таймаут для PvP вызова"""
@@ -2398,7 +2370,8 @@ async def pvp_challenge_timeout(user_id, context):
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text="⏰ Время твоего PvP вызова истекло"
+                text="*⏰ Время твоего PvP вызова истекло*",
+                parse_mode='Markdown'
             )
         except Exception as e:
             logger.error(f"Error notifying about challenge timeout: {e}")
@@ -2434,13 +2407,13 @@ async def menu_back_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    text = f"""{format_seasonal_message("Главное меню 🎮")}
+    text = f"""{format_seasonal_message("*Главное меню* 🎮")}
 
-{SEASON_NAME} {SEASON_EMOJI}
-Твой баланс: {balance} монет 💰
-Рефералов: {referral_stats['referrals_count']} 👥
+*{SEASON_NAME}* {SEASON_EMOJI}
+*Твой баланс:* `{balance}` монет 💰
+*Рефералов:* `{referral_stats['referrals_count']}` 👥
 
-Выбери действие:"""
+*Выбери действие:*"""
     
     await safe_edit_message(query, text, reply_markup)
 
@@ -2450,10 +2423,8 @@ def main():
     try:
         init_db()
         
-        # Создаем Application с правильными настройками
         application = Application.builder().token(BOT_TOKEN).build()
         
-        # Добавляем обработчики команд
         application.add_handler(CommandHandler("start", start))
         
         # Обработчик проверки подписки
@@ -2491,24 +2462,18 @@ def main():
         print("🤖 Бот готов к работе!")
         print("\nДля остановки нажмите Ctrl+C")
         
-        # Запускаем бота с обработкой ошибок
         application.run_polling(
             poll_interval=3,
             timeout=30,
-            drop_pending_updates=True,
-            allowed_updates=['message', 'callback_query']
+            drop_pending_updates=True
         )
         
     except Exception as e:
         logger.error(f"❌ Ошибка при запуске бота: {e}")
-        import traceback
-        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == '__main__':
-    # Запускаем health check сервер в отдельном потоке
     health_thread = threading.Thread(target=start_health_check_server, daemon=True)
     health_thread.start()
     
-    # Запускаем бота
     main()
